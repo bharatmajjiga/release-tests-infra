@@ -46,6 +46,10 @@ spec:
     - name: run
       image: $(params.IMAGE)
       workingDir: $(workspaces.release-tests-git.path)
+      envFrom:
+        - secretRef:
+            name: cluster-creds
+            optional: true
       env:
         - name: ADMIN_NAME
           valueFrom:
@@ -70,66 +74,6 @@ spec:
             secretKeyRef:
               key: api-url
               name: cluster-$(params.CLUSTER_NAME)
-        - name: GITHUB_TOKEN
-          valueFrom:
-            secretKeyRef:
-              key: github-token
-              name: github
-              optional: true
-        - name: PAC_GITHUB_TOKEN
-          valueFrom:
-            secretKeyRef:
-              key: pac-github-token
-              name: pac-github-token
-              optional: true
-        - name: PAC_GITHUB_ORG
-          valueFrom:
-            secretKeyRef:
-              key: pac-github-org
-              name: pac-github-token
-              optional: true
-        - name: PAC_GITHUB_WEBHOOK_TOKEN
-          valueFrom:
-            secretKeyRef:
-              key: pac-github-webhook-token
-              name: pac-github-token
-              optional: true
-        - name: CHAINS_DOCKER_CONFIG_JSON
-          valueFrom:
-            secretKeyRef:
-              key: config.json
-              name: quay-io-dockerconfig
-              optional: true
-        - name: GITLAB_GROUP_NAMESPACE
-          valueFrom:
-            secretKeyRef:
-              name: pac-gitlab
-              key: gitlab-group-ns
-              optional: true
-        - name: GITLAB_PROJECT_ID
-          valueFrom:
-            secretKeyRef:
-              name: pac-gitlab
-              key: gitlab-project-id
-              optional: true
-        - name: GITLAB_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: pac-gitlab
-              key: gitlab-token
-              optional: true
-        - name: GITLAB_WEBHOOK_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: pac-gitlab
-              key: gitlab-webhook-token
-              optional: true
-        - name: JIB_MAVEN_DOCKER_CONFIG_JSON
-          valueFrom:
-            secretKeyRef:
-              key: config.json
-              name: quay-io-dockerconfig
-              optional: true
         - name: USER_PASSWORD
           valueFrom:
             secretKeyRef:
@@ -140,8 +84,24 @@ spec:
         #!/usr/bin/env bash
         set -e -u -o pipefail
 
+        # Install oc and gauge if not present
+        TOOLS_BIN=$HOME/bin; mkdir -p "$TOOLS_BIN"; export PATH="$TOOLS_BIN:$PATH"
+
+        if ! command -v oc &>/dev/null; then
+          OC_ARCH=$(uname -m); [[ "$OC_ARCH" == "aarch64" ]] && OC_ARCH="arm64"
+          OCP_VER=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+            "${APISERVER}/apis/config.openshift.io/v1/clusterversions/version" \
+            | sed -n 's/.*"version":[[:space:]]*"\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/p' | head -1) || true
+          echo "Installing oc CLI ${OCP_VER:-stable} (${OC_ARCH})..."
+          curl -sSfL "https://mirror.openshift.com/pub/openshift-v4/${OC_ARCH}/clients/ocp/${OCP_VER:-stable}/openshift-client-linux.tar.gz" | tar xz -C "$TOOLS_BIN" oc kubectl
+        fi
+        if ! command -v gauge &>/dev/null; then
+          echo "Installing gauge..."
+          GOBIN="$TOOLS_BIN" go install github.com/getgauge/gauge@latest
+        fi
+
         export GOPATH=$(mktemp -d)/go
-        export GOMODCACHE=/opt/go/pkg/mod
+        export GOMODCACHE=${GOMODCACHE:-$GOPATH/pkg/mod}
         export GOCACHE=$(mktemp -d)/go-build
         export ADMIN_NAME=${ADMIN_NAME:-kubeadmin}
         export USER_PASSWORD=${USER_PASSWORD:-user}
@@ -149,7 +109,7 @@ spec:
         export CHAINS_REPOSITORY=$(params.CHAINS_REPOSITORY)
         export JIB_MAVEN_REPOSITORY=$(params.JIB_MAVEN_REPOSITORY)
 
-        taskRunName=$(oc get taskrun $(context.taskRun.name) -n $(context.taskRun.namespace) -o json | jq '.metadata.labels."tekton.dev/pipelineTask"' -r)
+        taskRunName=$(oc get taskrun $(context.taskRun.name) -n $(context.taskRun.namespace) -o jsonpath='{.metadata.labels.tekton\.dev/pipelineTask}')
         status=fail
 
         report_path=$(mktemp -d)
@@ -184,6 +144,10 @@ spec:
 
         go mod download
         gauge install go 2>&1 || true
+
+        # Pre-compile test code so gauge-go runner can start quickly
+        echo "Pre-compiling test code..."
+        go build ./...
 
         if [[ "$(params.TAGS)" == "install" ]] || [[ "$(params.TAGS)" == "uninstall" ]] || [[ "$(params.TAGS)" == "upgrade" ]] ; then
            gauge_reports_dir=${report_path} logs_directory=${report_path} CATALOG_SOURCE=$(params.CATALOG_SOURCE) CHANNEL=$(params.CHANNEL) IS_DISCONNECTED=$(params.IS_DISCONNECTED) gauge run --tags="$(params.TAGS)" --log-level=debug --verbose $(params.SPECS)

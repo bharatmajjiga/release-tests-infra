@@ -43,7 +43,7 @@ spec:
             secretKeyRef:
               key: api-url
               name: cluster-$(params.CLUSTER_NAME)
-      image: quay.io/openshift-pipeline/ci
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
       script: |
           #!/usr/bin/env bash
           set -euo pipefail

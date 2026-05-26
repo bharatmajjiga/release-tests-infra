@@ -1,0 +1,45 @@
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: collector
+  namespace: openshift-logging
+spec:
+  inputs:
+  - application:
+      selector:
+        matchExpressions:
+        - key: app.kubernetes.io/managed-by
+          operator: In
+          values: ["tekton-pipelines", "pipelinesascode.tekton.dev"]
+    name: only-tekton
+    type: application
+  managementState: Managed
+  outputs:
+  - lokiStack:
+      labelKeys:
+        application:
+          ignoreGlobal: true
+          labelKeys:
+          - log_type
+          - kubernetes.namespace_name
+          - openshift_cluster_id
+      authentication:
+        token:
+          from: serviceAccount
+      target:
+        name: logging-loki
+        namespace: openshift-logging
+    name: default-lokistack
+    tls:
+      ca:
+        configMapName: openshift-service-ca.crt
+        key: service-ca.crt
+    type: lokiStack
+  pipelines:
+  - inputRefs:
+    - only-tekton
+    name: default-logstore
+    outputRefs:
+    - default-lokistack
+  serviceAccount:
+    name: collector

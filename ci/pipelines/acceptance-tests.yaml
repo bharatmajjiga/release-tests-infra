@@ -11,7 +11,7 @@ spec:
     description: provide catalog-source name through which user have to subscribe operator
     default: custom-operators
   - name: CLUSTER_NAME
-    description: Cluster name (must match the vault-synced secret suffix, e.g. aws-421-arm-5node-84f4l)
+    description: Cluster name (must match the secret suffix, e.g. aws-421-arm-5node-84f4l)
   - name: GIT_INFRA_URI
     default: https://github.com/openshift-pipelines/release-tests-infra.git
   - name: GIT_INFRA_BRANCH
@@ -19,33 +19,38 @@ spec:
   - name: GIT_RELEASE_TESTS_URI
     default: https://github.com/openshift-pipelines/release-tests.git
   - name: GIT_RELEASE_TESTS_BRANCH
-    description: release-tests branch matching the operator version (e.g. release-v1.20)
+    description: release-tests branch matching the operator version (e.g. release-v1.22)
     default: ""
   - name: IMAGE
-    description: Image containing basic tools (oc, tkn, jq, yq etc.)
-    default: quay.io/openshift-pipeline/ci
+    description: Container image for running tests
+    default: registry.access.redhat.com/ubi9/go-toolset:latest
   - name: INSTALL_PIPELINES_OPERATOR
-    description: Installs the Openshift Pipelines operator if set to True/true
+    description: Install the Openshift Pipelines operator
     default: "true"
   - name: KONFLUX_INDEX_IMAGE
-    description: |
-      Specify index image URL such as
-      quay.io/openshift-pipeline/pipelines-index-4.21:v1.20.5
+    description: Konflux index image URL
     default: ""
   - name: OPERATOR_ENVIRONMENT
-    description: specify p12n operator environment (e.g. prod, stage, pre-stage)
+    description: p12n operator environment (prod, stage, pre-stage)
     default: pre-stage
   - name: OPERATOR_VERSION
-    description: |
-      version of the Openshift Pipelines operator in x.y.z format
-      ex: 1.6.0, 1.5.2
+    description: version of Openshift Pipelines operator (x.y.z)
     default: ""
+  - name: TAGS
+    description: gauge tags for test suites
+    default: "e2e"
+  - name: TEST_SUITES
+    type: array
+    description: list of test suites to run
+    default: []
   - name: UNINSTALL_PIPELINES_OPERATOR
     default: "false"
-    description: Setting this param to true/True will uninstall the operator after tests pass
+    description: Uninstall the operator after tests pass
   workspaces:
   - name: git
+
   tasks:
+  # --- Clone repos ---
   - name: clone-infra-git
     params:
       - name: URL
@@ -68,6 +73,7 @@ spec:
     - name: output
       workspace: git
       subPath: infra-git
+
   - name: clone-release-tests-git
     params:
       - name: URL
@@ -90,6 +96,8 @@ spec:
     - name: output
       workspace: git
       subPath: release-tests-git
+
+  # --- Setup ---
   - name: setup-testing-accounts
     params:
       - name: CLUSTER_NAME
@@ -102,6 +110,7 @@ spec:
     - name: infra-git
       workspace: git
       subPath: infra-git
+
   - name: generate-build-artifacts
     params:
       - name: CATALOG_SOURCE
@@ -116,6 +125,7 @@ spec:
       - name: build-artifacts
         workspace: git
         subPath: build-artifacts
+
   - name: configure-operator
     params:
       - name: CLUSTER_NAME
@@ -140,6 +150,8 @@ spec:
       - name: build-artifacts
         workspace: git
         subPath: build-artifacts
+
+  # --- Install operator ---
   - name: install-pipelines-operator
     params:
       - name: CATALOG_SOURCE
@@ -173,6 +185,435 @@ spec:
     - name: results
       workspace: git
       subPath: results
+
+  # ============================================================
+  # Test suites — each gated by TEST_SUITES array param
+  # All run after install-pipelines-operator
+  # ============================================================
+
+  - name: release-tests-versions
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/versions.spec"
+      - name: TAGS
+        value: $(params.TAGS)
+      - name: OSP_VERSION
+        value: $(params.OPERATOR_VERSION)
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 20m
+    when:
+      - input: release-tests-versions
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-pipelines
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "non-admin"
+      - name: SPECS
+        value: "specs/pipelines/"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-pipelines
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-triggers
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "non-admin"
+      - name: SPECS
+        value: "specs/triggers/"
+      - name: TAGS
+        value: "$(params.TAGS) & !tls"
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-triggers
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-triggers-tls
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/triggers/eventlistener.spec"
+      - name: TAGS
+        value: "tls & $(params.TAGS)"
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 20m
+    when:
+      - input: release-tests-triggers-tls
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-chains
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/chains/"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-chains
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-pac
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/pac/"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-pac
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-results
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "non-admin"
+      - name: SPECS
+        value: "specs/results/"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-results
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-metrics
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/metrics/"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 20m
+    when:
+      - input: release-tests-metrics
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-rbac
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/operator/rbac.spec"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 20m
+    when:
+      - input: release-tests-rbac
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-addon
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/operator/addon.spec"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 20m
+    when:
+      - input: release-tests-addon
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-auto-prune
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/operator/auto-prune.spec"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 20m
+    when:
+      - input: release-tests-auto-prune
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-manual-approval
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/manualapprovalgate/"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 20m
+    when:
+      - input: release-tests-manual-approval
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-ecosystem
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/ecosystem/ecosystem.spec"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-ecosystem
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-ecosystem-multiarch
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/ecosystem/ecosystem-multiarch.spec"
+      - name: TAGS
+        value: "$(params.ARCH) & $(params.TAGS)"
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-ecosystem-multiarch
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  - name: release-tests-ecosystem-s2i
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "non-admin"
+      - name: SPECS
+        value: "specs/ecosystem/ecosystem-s2i.spec"
+      - name: TAGS
+        value: "$(params.TAGS) & !skip_$(params.ARCH)"
+    runAfter: [install-pipelines-operator]
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-ecosystem-s2i
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+
+  # --- Uninstall operator (runs last) ---
   - name: uninstall-pipelines-operator
     onError: continue
     params:
@@ -190,6 +631,21 @@ spec:
       value: "uninstall"
     runAfter:
       - install-pipelines-operator
+      - release-tests-versions
+      - release-tests-pipelines
+      - release-tests-triggers
+      - release-tests-triggers-tls
+      - release-tests-chains
+      - release-tests-pac
+      - release-tests-results
+      - release-tests-metrics
+      - release-tests-rbac
+      - release-tests-addon
+      - release-tests-auto-prune
+      - release-tests-manual-approval
+      - release-tests-ecosystem
+      - release-tests-ecosystem-multiarch
+      - release-tests-ecosystem-s2i
     taskRef:
       name: release-tests
     timeout: 20m
