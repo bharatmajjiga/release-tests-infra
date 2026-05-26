@@ -1,0 +1,47 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: generate-build-artifacts
+spec:
+  workspaces:
+    - name: build-artifacts
+  params:
+    - name: CATALOG_SOURCE
+      description: Catalog source name for the operator subscription
+      default: custom-operators
+    - name: KONFLUX_INDEX_IMAGE
+      description: |
+        Konflux index image URL, e.g.
+        quay.io/openshift-pipeline/pipelines-index-4.21:v1.20.5
+  steps:
+    - name: generate-catalog-source
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          INDEX_IMAGE="$(params.KONFLUX_INDEX_IMAGE)"
+
+          if [[ -z "$INDEX_IMAGE" ]]; then
+            echo "ERROR: KONFLUX_INDEX_IMAGE param is required"
+            exit 1
+          fi
+
+          echo "Generating CatalogSource for index image: $INDEX_IMAGE"
+
+          cat <<EOF | tee $(workspaces.build-artifacts.path)/catalog-source.yaml
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: CatalogSource
+          metadata:
+            name: $(params.CATALOG_SOURCE)
+            namespace: openshift-marketplace
+          spec:
+            sourceType: grpc
+            image: $INDEX_IMAGE
+            displayName: $(params.CATALOG_SOURCE)
+            updateStrategy:
+              registryPoll:
+                interval: 30m
+          EOF
+
+          echo "CatalogSource YAML generated at $(workspaces.build-artifacts.path)/catalog-source.yaml"

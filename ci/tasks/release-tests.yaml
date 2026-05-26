@@ -1,0 +1,194 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: release-tests
+spec:
+  workspaces:
+    - name: release-tests-git
+    - name: results
+  params:
+  - name: ARCH
+    description: cluster architecture
+    default: "linux/amd64"
+  - name: CATALOG_SOURCE
+    description: Provide catalog-source name through which user have to subscribe operator
+    default: redhat-operators
+  - name: CHAINS_REPOSITORY
+    default: "quay.io/openshift-pipeline/chainstest"
+    description: the url of the repository where the test image will be pushed
+  - name: CHANNEL
+    description: Place-holder to provide subscription CHANNEL
+    default: stable
+  - name: CLUSTER_NAME
+    description: Cluster name
+  - name: FAIL_ON_ERROR
+    default: "false"
+  - name: IMAGE
+    description: release-tests image
+    default: quay.io/openshift-pipeline/ci
+  - name: IS_DISCONNECTED
+    description: flag to decide if provisioned cluster is disconnected
+    default: "false"
+  - name: JIB_MAVEN_REPOSITORY
+    default: "quay.io/openshift-pipeline/jib-maven"
+  - name: OSP_VERSION
+    description: "Full bugfix version of Openshift Pipelines"
+    default: ""
+  - name: RUN_AS
+    description: Provide user privilege to runs tests with  (eg one of admin/non-admin)
+    default: "non-admin"
+  - name: SPECS
+    description: Run tests only from that specific directory
+  - name: TAGS
+    description: Tags defines the nature of test cases you want to execute. (eg "e2e,integration")
+    default: "e2e,non-admin"
+  steps:
+    - name: run
+      image: $(params.IMAGE)
+      workingDir: $(workspaces.release-tests-git.path)
+      env:
+        - name: ADMIN_NAME
+          valueFrom:
+            secretKeyRef:
+              key: admin-name
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: kubeadmin-password
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: admin-token
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: APISERVER
+          valueFrom:
+            secretKeyRef:
+              key: api-url
+              name: cluster-$(params.CLUSTER_NAME)
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: github-token
+              name: github
+              optional: true
+        - name: PAC_GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: pac-github-token
+              name: pac-github-token
+              optional: true
+        - name: PAC_GITHUB_ORG
+          valueFrom:
+            secretKeyRef:
+              key: pac-github-org
+              name: pac-github-token
+              optional: true
+        - name: PAC_GITHUB_WEBHOOK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: pac-github-webhook-token
+              name: pac-github-token
+              optional: true
+        - name: CHAINS_DOCKER_CONFIG_JSON
+          valueFrom:
+            secretKeyRef:
+              key: config.json
+              name: quay-io-dockerconfig
+              optional: true
+        - name: GITLAB_GROUP_NAMESPACE
+          valueFrom:
+            secretKeyRef:
+              name: pac-gitlab
+              key: gitlab-group-ns
+              optional: true
+        - name: GITLAB_PROJECT_ID
+          valueFrom:
+            secretKeyRef:
+              name: pac-gitlab
+              key: gitlab-project-id
+              optional: true
+        - name: GITLAB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: pac-gitlab
+              key: gitlab-token
+              optional: true
+        - name: GITLAB_WEBHOOK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: pac-gitlab
+              key: gitlab-webhook-token
+              optional: true
+        - name: JIB_MAVEN_DOCKER_CONFIG_JSON
+          valueFrom:
+            secretKeyRef:
+              key: config.json
+              name: quay-io-dockerconfig
+              optional: true
+        - name: USER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: user-password
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+      script: |
+        #!/usr/bin/env bash
+        set -e -u -o pipefail
+
+        export GOPATH=$(mktemp -d)/go
+        export GOMODCACHE=/opt/go/pkg/mod
+        export GOCACHE=$(mktemp -d)/go-build
+        export ADMIN_NAME=${ADMIN_NAME:-kubeadmin}
+        export USER_PASSWORD=${USER_PASSWORD:-user}
+        export KUBECONFIG=$HOME/.kube/config
+        export CHAINS_REPOSITORY=$(params.CHAINS_REPOSITORY)
+        export JIB_MAVEN_REPOSITORY=$(params.JIB_MAVEN_REPOSITORY)
+
+        taskRunName=$(oc get taskrun $(context.taskRun.name) -n $(context.taskRun.namespace) -o json | jq '.metadata.labels."tekton.dev/pipelineTask"' -r)
+        status=fail
+
+        report_path=$(mktemp -d)
+
+        if [[ $(echo $(params.RUN_AS) | tr -s  '[:upper:]'  '[:lower:]') == admin ]]; then
+            if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+              echo -e "Logging in to cluster $(params.CLUSTER_NAME) with admin token"
+              oc login --token=$ADMIN_TOKEN $APISERVER --insecure-skip-tls-verify=true
+            else
+              echo -e "Logging in to cluster $(params.CLUSTER_NAME) as user '$ADMIN_NAME'"
+              oc login -u $ADMIN_NAME -p $ADMIN_PASSWORD $APISERVER --insecure-skip-tls-verify=true
+            fi
+        else
+            echo -e "Logging in to cluster $(params.CLUSTER_NAME) as user 'user'"
+            oc login -u user -p $USER_PASSWORD $APISERVER --insecure-skip-tls-verify=true
+        fi
+
+        if [[ -n "$(params.OSP_VERSION)" ]]; then
+          export OSP_VERSION="$(params.OSP_VERSION)"
+        fi
+
+        clean() {
+          echo "Updating status of test result as $status"
+          echo "${taskRunName}: ${status}" > $(workspaces.results.path)/${taskRunName}.result
+
+          if [[ -f ${report_path}/xml-report/result.xml ]]; then
+            cp ${report_path}/xml-report/result.xml $(workspaces.results.path)/${taskRunName}.xml
+          fi
+          cp ${report_path}/gauge.log $(workspaces.results.path)/${taskRunName}.log
+        }
+        trap clean EXIT
+
+        go mod download
+        gauge install go 2>&1 || true
+
+        if [[ "$(params.TAGS)" == "install" ]] || [[ "$(params.TAGS)" == "uninstall" ]] || [[ "$(params.TAGS)" == "upgrade" ]] ; then
+           gauge_reports_dir=${report_path} logs_directory=${report_path} CATALOG_SOURCE=$(params.CATALOG_SOURCE) CHANNEL=$(params.CHANNEL) IS_DISCONNECTED=$(params.IS_DISCONNECTED) gauge run --tags="$(params.TAGS)" --log-level=debug --verbose $(params.SPECS)
+           status=pass
+        else
+           gauge_reports_dir=${report_path} logs_directory=${report_path} ARCH=$(params.ARCH) gauge run --tags="$(params.TAGS)" --max-retries-count=3 --retry-only "$(params.TAGS)" --log-level=debug --verbose $(params.SPECS)
+           status=pass
+        fi

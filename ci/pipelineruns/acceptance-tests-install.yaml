@@ -1,0 +1,37 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: acceptance-tests-120-on-421-konflux-
+spec:
+  pipelineRef:
+    name: acceptance-tests
+  params:
+    - name: ARCH
+      value: "linux/arm64"
+    - name: CATALOG_SOURCE
+      value: custom-operators
+    - name: CLUSTER_NAME
+      value: "aws-421-arm-5node-84f4l"
+    - name: GIT_RELEASE_TESTS_BRANCH
+      value: "release-v1.20"
+    - name: INSTALL_PIPELINES_OPERATOR
+      value: "true"
+    - name: KONFLUX_INDEX_IMAGE
+      value: quay.io/openshift-pipeline/pipelines-index-4.21:v1.20.5
+    - name: OPERATOR_ENVIRONMENT
+      value: pre-stage
+    - name: OPERATOR_VERSION
+      value: "1.20.5"
+    - name: UNINSTALL_PIPELINES_OPERATOR
+      value: "false"
+  timeouts:
+    pipeline: 1h
+  workspaces:
+    - name: git
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 200Mi

@@ -1,0 +1,141 @@
+---
+'1.15':
+  channel: pipelines-1.15
+  cli:
+    revision: release-v0.37.1
+  operator:
+    revision: release-v0.71.x
+  pipeline:
+    revision: release-v0.59.x
+  pipelines-as-code:
+    revision: release-v0.27.x
+  release-tests:
+    revision: release-v1.15
+  trigger:
+    revision: release-v0.27.x
+'1.16':
+  channel: pipelines-1.16
+  cli:
+    revision: release-v0.38.1
+  operator:
+    revision: release-v0.73.x
+  pipeline:
+    revision: release-v0.62.x
+  pipelines-as-code:
+    revision: release-v0.28.x
+  release-tests:
+    revision: release-v1.16
+  trigger:
+    revision: release-v0.29.x
+'1.17':
+  channel: pipelines-1.17
+  cli:
+    revision: release-v0.39.0
+  operator:
+    revision: release-v0.74.x
+  pipeline:
+    revision: release-v0.65.x
+  pipelines-as-code:
+    revision: release-v0.29.x
+  release-tests:
+    revision: release-v1.17
+  trigger:
+    revision: release-v0.30.x
+'1.18':
+  channel: pipelines-1.18
+  cli:
+    revision: release-v0.40.0
+  operator:
+    revision: release-v0.75.x
+  pipeline:
+    revision: release-v0.68.x
+  pipelines-as-code:
+    revision: release-v0.33.x
+  release-tests:
+    revision: release-v1.18
+  trigger:
+    revision: release-v0.31.x
+'1.19':
+  channel: pipelines-1.19
+  cli:
+    revision: release-v0.41.0
+  operator:
+    revision: release-v0.76.x
+  pipeline:
+    revision: release-v1.0.x
+  pipelines-as-code:
+    revision: release-v0.35.x
+  release-tests:
+    revision: release-v1.19
+  trigger:
+    revision: release-v0.32.x
+'1.20':
+  channel: pipelines-1.20
+  cli:
+    revision: release-v0.42.0
+  operator:
+    revision: release-v0.77.x
+  pipeline:
+    revision: release-v1.3.x
+  pipelines-as-code:
+    revision: release-v0.37.x
+  release-tests:
+    revision: release-v1.20
+  trigger:
+    revision: release-v0.33.x
+'1.21':
+  channel: pipelines-1.21
+  cli:
+    revision: release-v0.43.0
+  operator:
+    revision: release-v0.78.x
+  pipeline:
+    revision: release-v1.6.x
+  pipelines-as-code:
+    revision: release-v0.39.x
+  release-tests:
+    revision: release-v1.21
+  trigger:
+    revision: release-v0.34.x
+'1.22':
+  channel: pipelines-1.22
+  cli:
+    revision: release-v0.44.0
+  operator:
+    revision: release-v0.79.x
+  pipeline:
+    revision: release-v1.9.x
+  pipelines-as-code:
+    revision: release-v0.42.x
+  release-tests:
+    revision: release-v1.22
+  trigger:
+    revision: release-v0.35.x
+'1.23':
+  channel: pipelines-1.23
+  cli:
+    revision: release-v0.44.0
+  operator:
+    revision: release-v0.79.x
+  pipeline:
+    revision: release-v1.9.x
+  pipelines-as-code:
+    revision: release-v0.42.x
+  release-tests:
+    revision: release-v1.23
+  trigger:
+    revision: release-v0.35.x
+'5.0':
+  channel: pipelines-5.0
+  cli:
+    revision: main
+  operator:
+    revision: main
+  pipeline:
+    revision: release-v0.68.x
+  pipelines-as-code:
+    revision: release-v0.32.x
+  release-tests:
+    revision: master
+  trigger:
+    revision: release-v0.31.x

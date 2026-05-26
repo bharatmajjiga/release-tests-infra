@@ -1,0 +1,206 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: acceptance-tests
+spec:
+  params:
+  - name: ARCH
+    description: cluster architecture
+    default: "linux/amd64"
+  - name: CATALOG_SOURCE
+    description: provide catalog-source name through which user have to subscribe operator
+    default: custom-operators
+  - name: CLUSTER_NAME
+    description: Cluster name (must match the vault-synced secret suffix, e.g. aws-421-arm-5node-84f4l)
+  - name: GIT_INFRA_URI
+    default: https://github.com/openshift-pipelines/release-tests-infra.git
+  - name: GIT_INFRA_BRANCH
+    default: main
+  - name: GIT_RELEASE_TESTS_URI
+    default: https://github.com/openshift-pipelines/release-tests.git
+  - name: GIT_RELEASE_TESTS_BRANCH
+    description: release-tests branch matching the operator version (e.g. release-v1.20)
+    default: ""
+  - name: IMAGE
+    description: Image containing basic tools (oc, tkn, jq, yq etc.)
+    default: quay.io/openshift-pipeline/ci
+  - name: INSTALL_PIPELINES_OPERATOR
+    description: Installs the Openshift Pipelines operator if set to True/true
+    default: "true"
+  - name: KONFLUX_INDEX_IMAGE
+    description: |
+      Specify index image URL such as
+      quay.io/openshift-pipeline/pipelines-index-4.21:v1.20.5
+    default: ""
+  - name: OPERATOR_ENVIRONMENT
+    description: specify p12n operator environment (e.g. prod, stage, pre-stage)
+    default: pre-stage
+  - name: OPERATOR_VERSION
+    description: |
+      version of the Openshift Pipelines operator in x.y.z format
+      ex: 1.6.0, 1.5.2
+    default: ""
+  - name: UNINSTALL_PIPELINES_OPERATOR
+    default: "false"
+    description: Setting this param to true/True will uninstall the operator after tests pass
+  workspaces:
+  - name: git
+  tasks:
+  - name: clone-infra-git
+    params:
+      - name: URL
+        value: $(params.GIT_INFRA_URI)
+      - name: DELETE_EXISTING
+        value: "true"
+      - name: REVISION
+        value: $(params.GIT_INFRA_BRANCH)
+    taskRef:
+      resolver: cluster
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: git-clone
+      - name: namespace
+        value: openshift-pipelines
+    timeout: 10m
+    workspaces:
+    - name: output
+      workspace: git
+      subPath: infra-git
+  - name: clone-release-tests-git
+    params:
+      - name: URL
+        value: $(params.GIT_RELEASE_TESTS_URI)
+      - name: DELETE_EXISTING
+        value: "true"
+      - name: REVISION
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+    taskRef:
+      resolver: cluster
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: git-clone
+      - name: namespace
+        value: openshift-pipelines
+    timeout: 10m
+    workspaces:
+    - name: output
+      workspace: git
+      subPath: release-tests-git
+  - name: setup-testing-accounts
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+    runAfter:
+      - clone-infra-git
+    taskRef:
+      name: setup-testing-accounts
+    workspaces:
+    - name: infra-git
+      workspace: git
+      subPath: infra-git
+  - name: generate-build-artifacts
+    params:
+      - name: CATALOG_SOURCE
+        value: $(params.CATALOG_SOURCE)
+      - name: KONFLUX_INDEX_IMAGE
+        value: $(params.KONFLUX_INDEX_IMAGE)
+    runAfter:
+      - clone-infra-git
+    taskRef:
+      name: generate-build-artifacts
+    workspaces:
+      - name: build-artifacts
+        workspace: git
+        subPath: build-artifacts
+  - name: configure-operator
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: CATALOG_SOURCE
+        value: $(params.CATALOG_SOURCE)
+      - name: OPERATOR_ENVIRONMENT
+        value: $(params.OPERATOR_ENVIRONMENT)
+    taskRef:
+      name: configure-operator
+    runAfter:
+      - generate-build-artifacts
+      - setup-testing-accounts
+    when:
+      - input: $(params.OPERATOR_ENVIRONMENT)
+        operator: notin
+        values: ["prod"]
+      - input: $(params.INSTALL_PIPELINES_OPERATOR)
+        operator: in
+        values: ["true", "True"]
+    workspaces:
+      - name: build-artifacts
+        workspace: git
+        subPath: build-artifacts
+  - name: install-pipelines-operator
+    params:
+      - name: CATALOG_SOURCE
+        value: $(params.CATALOG_SOURCE)
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: FAIL_ON_ERROR
+        value: "True"
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/olm.spec"
+      - name: TAGS
+        value: "install"
+    runAfter:
+      - configure-operator
+      - clone-release-tests-git
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: $(params.INSTALL_PIPELINES_OPERATOR)
+        operator: in
+        values: ["true", "True"]
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+  - name: uninstall-pipelines-operator
+    onError: continue
+    params:
+    - name: CLUSTER_NAME
+      value: $(params.CLUSTER_NAME)
+    - name: FAIL_ON_ERROR
+      value: "True"
+    - name: IMAGE
+      value: $(params.IMAGE)
+    - name: RUN_AS
+      value: "admin"
+    - name: SPECS
+      value: "specs/olm.spec"
+    - name: TAGS
+      value: "uninstall"
+    runAfter:
+      - install-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 20m
+    workspaces:
+    - name: release-tests-git
+      workspace: git
+      subPath: release-tests-git
+    - name: results
+      workspace: git
+      subPath: results
+    when:
+      - input: $(params.UNINSTALL_PIPELINES_OPERATOR)
+        operator: in
+        values: ["true", "True"]
