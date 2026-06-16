@@ -5,52 +5,99 @@ metadata:
 spec:
   workspaces:
     - name: release-tests-git
+    - name: release-tests-ginkgo-git
+    - name: gomod-cache
     - name: results
   params:
   - name: ARCH
-    description: cluster architecture
     default: "linux/amd64"
   - name: CATALOG_SOURCE
-    description: Provide catalog-source name through which user have to subscribe operator
     default: redhat-operators
   - name: CHAINS_REPOSITORY
     default: "quay.io/openshift-pipeline/chainstest"
-    description: the url of the repository where the test image will be pushed
   - name: CHANNEL
-    description: Place-holder to provide subscription CHANNEL
     default: stable
   - name: CLUSTER_NAME
-    description: Cluster name
   - name: FAIL_ON_ERROR
     default: "false"
   - name: IMAGE
-    description: release-tests image
     default: quay.io/openshift-pipeline/ci
   - name: IS_DISCONNECTED
-    description: flag to decide if provisioned cluster is disconnected
     default: "false"
   - name: JIB_MAVEN_REPOSITORY
     default: "quay.io/openshift-pipeline/jib-maven"
   - name: OSP_VERSION
-    description: "Full bugfix version of Openshift Pipelines"
     default: ""
   - name: RUN_AS
-    description: Provide user privilege to runs tests with  (eg one of admin/non-admin)
     default: "non-admin"
   - name: SPECS
-    description: Run tests only from that specific directory
+    description: Gauge spec path (specs/*.spec) or Ginkgo test path (tests/*/)
   - name: TAGS
-    description: Tags defines the nature of test cases you want to execute. (eg "e2e,integration")
     default: "e2e,non-admin"
+  - name: TKN_DOWNLOAD_URL
+    default: ""
+  - name: TEST_FRAMEWORK
+    description: gauge (release-tests) or ginkgo (release-tests-ginkgo)
+    default: gauge
+  - name: GIT_RELEASE_TESTS_BRANCH
+    description: Gauge repo branch (cache key when TEST_FRAMEWORK=gauge)
+    default: ""
+  - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+    description: Ginkgo repo branch (cache key when TEST_FRAMEWORK=ginkgo)
+    default: ""
   steps:
     - name: run
       image: $(params.IMAGE)
       workingDir: $(workspaces.release-tests-git.path)
-      envFrom:
-        - secretRef:
-            name: cluster-creds
-            optional: true
       env:
+        - name: PAC_GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: pac-github-token
+              key: pac-github-token
+              optional: true
+        - name: PAC_GITHUB_ORG
+          valueFrom:
+            secretKeyRef:
+              name: pac-github-token
+              key: pac-github-org
+              optional: true
+        - name: PAC_GITHUB_WEBHOOK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: pac-github-token
+              key: pac-github-webhook-token
+              optional: true
+        - name: GITLAB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: pac-gitlab
+              key: gitlab-token
+              optional: true
+        - name: GITLAB_GROUP_NAMESPACE
+          valueFrom:
+            secretKeyRef:
+              name: pac-gitlab
+              key: gitlab-group-ns
+              optional: true
+        - name: GITLAB_PROJECT_ID
+          valueFrom:
+            secretKeyRef:
+              name: pac-gitlab
+              key: gitlab-project-id
+              optional: true
+        - name: GITLAB_WEBHOOK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: pac-gitlab
+              key: gitlab-webhook-token
+              optional: true
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: github
+              key: github-token
+              optional: true
         - name: ADMIN_NAME
           valueFrom:
             secretKeyRef:
@@ -80,79 +127,400 @@ spec:
               key: user-password
               name: cluster-$(params.CLUSTER_NAME)
               optional: true
+        - name: TASKRUN_NAME
+          value: $(context.taskRun.name)
+        - name: TASKRUN_NAMESPACE
+          value: $(context.taskRun.namespace)
       script: |
         #!/usr/bin/env bash
-        set -e -u -o pipefail
+        set -euo pipefail
 
-        # Install oc and gauge if not present
-        TOOLS_BIN=$HOME/bin; mkdir -p "$TOOLS_BIN"; export PATH="$TOOLS_BIN:$PATH"
+        # --- helpers ---
+        pod_arch() {
+          case "$(uname -m)" in aarch64) echo arm64 ;; x86_64) echo amd64 ;; *) uname -m ;; esac
+        }
 
-        if ! command -v oc &>/dev/null; then
-          OC_ARCH=$(uname -m); [[ "$OC_ARCH" == "aarch64" ]] && OC_ARCH="arm64"
-          OCP_VER=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+        # release-tests-ginkgo S2I tests start PipelineRuns before the operator creates the pipeline SA.
+        prepare_ginkgo_ecosystem_s2i() {
+          local specs="$1"
+          [[ "$specs" != *ecosystem-s2i* ]] && return 0
+          local eco="pkg/pipelines/ecosystem.go" s2i="tests/ecosystem/ecosystem_s2i_test.go"
+          if [[ -f "$eco" ]] && ! grep -q 'WaitForServiceAccount(cs, namespace, "pipeline")' "$eco"; then
+            echo "Patching ${eco}: wait for pipeline ServiceAccount before concurrent S2I PipelineRuns"
+            if ! grep -q 'release-tests-ginkgo/pkg/k8s' "$eco"; then
+              awk '/github.com\/openshift-pipelines\/release-tests-ginkgo\/pkg\/config/ && !done_imp {
+                print; print "\t\"github.com/openshift-pipelines/release-tests-ginkgo/pkg/k8s\""; done_imp=1; next
+              } { print }' "$eco" > "${eco}.tmp" && mv "${eco}.tmp" "$eco"
+            fi
+            awk '/^\tworkspaces := map\[string\]string/ && !done_wait {
+              print "\tk8s.WaitForServiceAccount(cs, namespace, \"pipeline\")"; done_wait=1
+            } { print }' "$eco" > "${eco}.tmp" && mv "${eco}.tmp" "$eco"
+          fi
+          if [[ -f "$s2i" ]] && ! grep -q 'WaitForServiceAccount(sharedClients, ns, "pipeline")' "$s2i"; then
+            echo "Patching ${s2i}: wait for pipeline ServiceAccount before S2I test resources"
+            if ! grep -q 'release-tests-ginkgo/pkg/k8s' "$s2i"; then
+              awk '/github.com\/openshift-pipelines\/release-tests-ginkgo\/pkg\/config/ && !done_imp {
+                print; print "\t\"github.com/openshift-pipelines/release-tests-ginkgo/pkg/k8s\""; done_imp=1; next
+              } { print }' "$s2i" > "${s2i}.tmp" && mv "${s2i}.tmp" "$s2i"
+            fi
+            awk '/sharedClients\.NewClientSet\(ns\)/ {
+              print; print "\t\tk8s.WaitForServiceAccount(sharedClients, ns, \"pipeline\")"; next
+            } { print }' "$s2i" > "${s2i}.tmp" && mv "${s2i}.tmp" "$s2i"
+          fi
+        }
+
+        cleanup_stale_s2i_namespaces() {
+          local specs="$1"
+          [[ "$specs" != *ecosystem-s2i* ]] && return 0
+          local projects deleted=0
+          projects=$(oc get projects -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+            | grep -E '^eco-s2i-' || true)
+          [[ -n "$projects" ]] || return 0
+          echo "Cleaning stale eco-s2i-* namespaces from prior runs"
+          while IFS= read -r ns; do
+            [[ -n "$ns" ]] || continue
+            oc delete project "$ns" --wait=false >/dev/null 2>&1 && deleted=$((deleted + 1)) || true
+          done <<< "$projects"
+          echo "Requested deletion of ${deleted} stale namespace(s)"
+        }
+
+        resolve_tkn_url() {
+          local url="${1:-}"
+          if [[ -n "$url" ]]; then
+            url="${url/developers.qa.redhat.com/developers.redhat.com}"
+            echo "$url" | sed -E \
+              "s|/content-gateway/rest/browse/pub/cgw/pipelines/([^/]+)/?.*|/content-gateway/file/pub/cgw/pipelines/\1/tkn-linux-${CLI_ARCH}.tar.gz|" \
+              | sed -E "s/tkn-linux-[a-z0-9]+\.tar\.gz/tkn-linux-${CLI_ARCH}.tar.gz/"
+          else
+            echo "https://developers.redhat.com/content-gateway/file/pub/cgw/pipelines/${OSP_VER}/tkn-linux-${CLI_ARCH}.tar.gz"
+          fi
+        }
+
+        gomod_hash() {
+          local repo="${1:-.}"
+          [[ -f "$repo/go.mod" ]] || return 1
+          sha256sum "$repo/go.mod" | sha256sum | awk '{print substr($1,1,12)}'
+        }
+
+        install_oc() {
+          local ver
+          ver=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
             "${APISERVER}/apis/config.openshift.io/v1/clusterversions/version" \
             | sed -n 's/.*"version":[[:space:]]*"\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/p' | head -1) || true
-          echo "Installing oc CLI ${OCP_VER:-stable} (${OC_ARCH})..."
-          curl -sSfL "https://mirror.openshift.com/pub/openshift-v4/${OC_ARCH}/clients/ocp/${OCP_VER:-stable}/openshift-client-linux.tar.gz" | tar xz -C "$TOOLS_BIN" oc kubectl
-        fi
-        if ! command -v gauge &>/dev/null; then
-          echo "Installing gauge..."
-          GOBIN="$TOOLS_BIN" go install github.com/getgauge/gauge@latest
-        fi
+          echo "Installing oc ${ver:-stable} (${CLI_ARCH})..."
+          curl -sSfL "https://mirror.openshift.com/pub/openshift-v4/${CLI_ARCH}/clients/ocp/${ver:-stable}/openshift-client-linux.tar.gz" \
+            | tar xz -C "$TOOLS_BIN" oc kubectl
+        }
 
-        export GOPATH=$(mktemp -d)/go
-        export GOMODCACHE=${GOMODCACHE:-$GOPATH/pkg/mod}
-        export GOCACHE=$(mktemp -d)/go-build
-        export ADMIN_NAME=${ADMIN_NAME:-kubeadmin}
-        export USER_PASSWORD=${USER_PASSWORD:-user}
-        export KUBECONFIG=$HOME/.kube/config
-        export CHAINS_REPOSITORY=$(params.CHAINS_REPOSITORY)
-        export JIB_MAVEN_REPOSITORY=$(params.JIB_MAVEN_REPOSITORY)
+        install_tkn() {
+          local url archive tmp jar
+          url=$(resolve_tkn_url "$(params.TKN_DOWNLOAD_URL)")
+          archive="/tmp/tkn-linux-${CLI_ARCH}.tar.gz"
+          if [[ ! -s "$archive" ]]; then
+            echo "Downloading tkn/opc from ${url}..."
+            tmp="${archive}.part.$$"; jar=$(mktemp)
+            curl -fsSL -c "$jar" -b "$jar" "$url" -o "$tmp" && rm -f "$jar" && mv "$tmp" "$archive"
+          fi
+          tar xzf "$archive" -C "$TOOLS_BIN" --strip-components=1
+        }
 
-        taskRunName=$(oc get taskrun $(context.taskRun.name) -n $(context.taskRun.namespace) -o jsonpath='{.metadata.labels.tekton\.dev/pipelineTask}')
+        ensure_gauge() {
+          command -v gauge >/dev/null && return
+          [[ -x "$TOOLS_BIN/gauge" ]] && return
+          GOBIN="$TOOLS_BIN" go install github.com/getgauge/gauge@v1.6.25
+          gauge install go 2>&1 || true
+          gauge install html-report && gauge install xml-report -v 0.5.3
+          gauge config check_updates false
+          gauge config runner_connection_timeout 900000
+          gauge config runner_request_timeout 600000
+        }
+
+        ensure_ginkgo() {
+          command -v ginkgo >/dev/null && return
+          [[ -x "$TOOLS_BIN/ginkgo" ]] && return
+          GOBIN="$TOOLS_BIN" go install github.com/onsi/ginkgo/v2/ginkgo
+        }
+
+        install_jq() {
+          local jq_arch
+          jq_arch=$(pod_arch)
+          [[ "$jq_arch" == "amd64" ]] || true
+          echo "Downloading jq (${jq_arch})..."
+          curl -fsSL "https://github.com/jqlang/jq/releases/latest/download/jq-linux-${jq_arch}" \
+            -o "$TOOLS_BIN/jq" && chmod +x "$TOOLS_BIN/jq"
+        }
+
+        ensure_toolchain() {
+          [[ -x "${CACHED_TOOLS_BIN:-}/oc" || -x "$TOOLS_BIN/oc" ]] || install_oc
+          [[ (-x "${CACHED_TOOLS_BIN:-}/tkn" && -x "${CACHED_TOOLS_BIN:-}/opc") || (-x "$TOOLS_BIN/tkn" && -x "$TOOLS_BIN/opc") ]] || install_tkn
+          [[ -x "${CACHED_TOOLS_BIN:-}/jq" || -x "$TOOLS_BIN/jq" ]] || command -v jq >/dev/null || install_jq
+          case "$FRAMEWORK" in
+            gauge)  ensure_gauge ;;
+            ginkgo) ensure_ginkgo ;;
+          esac
+        }
+
+        use_gomod_cache() {
+          local computed cache_id key tools gauge_home
+          local key_file="${GOMODCACHE_ROOT}/.${FRAMEWORK}.cache-key"
+          local ready_file="${GOMODCACHE_ROOT}/.${FRAMEWORK}.cache-ready"
+
+          if [[ -d vendor ]]; then
+            computed=$(gomod_hash .)
+            key="${GOMODCACHE_ROOT}/${computed}/gomod"
+            tools="${GOMODCACHE_ROOT}/${computed}/tools/bin"
+            export GOMODCACHE="$key" CACHED_TOOLS_BIN="$tools"
+            echo "Using vendored dependencies in $(pwd)"
+            return
+          fi
+
+          # Use the cache key from go-mod-cache (same PVC subPath for all test TaskRuns).
+          local deadline=$((SECONDS + 900))
+          while (( SECONDS < deadline )); do
+            [[ -f "$ready_file" && -f "$key_file" ]] && break
+            echo "waiting for go-mod-cache to finish..."
+            sleep 5
+          done
+          [[ -f "$key_file" && -f "$ready_file" ]] \
+            || { echo "ERROR: shared cache not ready (missing ${key_file} or ${ready_file})"; exit 1; }
+
+          cache_id=$(tr -d '[:space:]' < "$key_file")
+          computed=$(gomod_hash .) || { echo "ERROR: go.mod missing in $(pwd)"; exit 1; }
+          if [[ "$computed" != "$cache_id" ]]; then
+            echo "WARN: go.mod hash drift: repo=${computed} download=${cache_id} (using download cache key)"
+          fi
+
+          key="${GOMODCACHE_ROOT}/${cache_id}/gomod"
+          tools="${GOMODCACHE_ROOT}/${cache_id}/tools/bin"
+          gauge_home="${GOMODCACHE_ROOT}/${cache_id}/gauge-home"
+          [[ -f "${key}/.ready" && -f "${tools}/.ready" ]] \
+            || { echo "ERROR: cache markers missing under ${GOMODCACHE_ROOT}/${cache_id}/"; exit 1; }
+
+          export GOMODCACHE="$key" CACHED_TOOLS_BIN="$tools"
+          if [[ "$FRAMEWORK" == gauge && -f "${gauge_home}/.ready" ]]; then
+            export GAUGE_HOME="$gauge_home"
+          fi
+          echo "Using cached go modules: ${GOMODCACHE} (hash=${cache_id})"
+          echo "Using cached test tools: ${CACHED_TOOLS_BIN}"
+        }
+
+        prepare_toolchain() {
+          TOOLS_BIN="$(mktemp -d)/bin"
+          GOCACHE="$(mktemp -d)"
+          mkdir -p "$TOOLS_BIN"
+          export GOCACHE
+          if [[ -n "${CACHED_TOOLS_BIN:-}" && -d "$CACHED_TOOLS_BIN" ]]; then
+            export PATH="${CACHED_TOOLS_BIN}:${TOOLS_BIN}:${PATH}"
+          else
+            export PATH="${TOOLS_BIN}:${PATH}"
+          fi
+          if [[ "$FRAMEWORK" == gauge && -z "${GAUGE_HOME:-}" ]]; then
+            GAUGE_HOME="$(mktemp -d)"
+            export GAUGE_HOME
+          fi
+          ensure_toolchain
+        }
+
+        ginkgo_test_path() {
+          local spec="$(params.SPECS)"
+          case "$spec" in
+            tests/*)              echo "$spec" ;;
+            specs/olm*)           echo tests/olm/ ;;
+            specs/versions*)      echo tests/versions/ ;;
+            specs/pac/*|specs/pac*) echo tests/pac/ ;;
+            specs/pipelines*)     echo tests/pipelines/ ;;
+            specs/triggers*)      echo tests/triggers/ ;;
+            specs/chains*)        echo tests/chains/ ;;
+            specs/results*)       echo tests/results/ ;;
+            specs/operator*)      echo tests/operator/ ;;
+            specs/ecosystem*)     echo tests/ecosystem/ ;;
+            specs/metrics*)       echo tests/metrics/ ;;
+            specs/rbac*)          echo tests/operator/ ;;
+            specs/addon*)          echo tests/operator/ ;;
+            *)                    echo tests/... ;;
+          esac
+        }
+
+        ginkgo_label_filter() {
+          local tags="$1"
+          case "$tags" in
+            install|uninstall|upgrade) echo "$tags" ;;
+            e2e) echo 'e2e && !disconnected' ;;
+            *)
+              # gauge-style "a,b" or "a & b" → ginkgo label syntax; slashes break ginkgo labels (linux/amd64)
+              echo "$tags" | sed 's/[[:space:]]*&[[:space:]]*/ \&\& /g; s/,/ \&\& /g; s|/|_|g'
+              ;;
+          esac
+        }
+
+        require_tools() {
+          local t
+          for t in oc tkn opc; do
+            command -v "$t" >/dev/null || { echo "ERROR: ${t} missing"; exit 1; }
+          done
+          case "$FRAMEWORK" in
+            gauge)  command -v gauge >/dev/null || { echo "ERROR: gauge missing"; exit 1; } ;;
+            ginkgo) command -v ginkgo >/dev/null || { echo "ERROR: ginkgo missing"; exit 1; } ;;
+          esac
+        }
+
+        login_cluster() {
+          local run_as="${1,,}"
+          if [[ "$run_as" == admin ]]; then
+            if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+              oc login --token="$ADMIN_TOKEN" "$APISERVER" --insecure-skip-tls-verify=true
+            else
+              oc login -u "$ADMIN_NAME" -p "$ADMIN_PASSWORD" "$APISERVER" --insecure-skip-tls-verify=true
+            fi
+          else
+            oc login -u user -p "$USER_PASSWORD" "$APISERVER" --insecure-skip-tls-verify=true
+          fi
+        }
+
+        run_gauge() {
+          local tags="$1" target="$(params.SPECS)"
+          [[ -f manifest.json ]] || { echo "ERROR: manifest.json missing in $(pwd)"; ls -la; exit 1; }
+          [[ -e "$target" ]] || { echo "ERROR: gauge spec path missing: ${target}"; ls -la specs/ 2>/dev/null || true; exit 1; }
+          local log="${report_path}/gauge.log"
+          if [[ "$tags" == install || "$tags" == uninstall || "$tags" == upgrade ]]; then
+            gauge_reports_dir="${report_path}" logs_directory="${report_path}" \
+              CATALOG_SOURCE="$(params.CATALOG_SOURCE)" CHANNEL="$(params.CHANNEL)" \
+              IS_DISCONNECTED="$(params.IS_DISCONNECTED)" \
+              gauge run --tags="${tags}" --log-level=debug --verbose "${target}" 2>&1 | tee "$log"
+          else
+            ARCH="$(params.ARCH)" gauge_reports_dir="${report_path}" logs_directory="${report_path}" \
+              gauge run --tags="${tags}" --max-retries-count=3 --retry-only "${tags}" \
+              --log-level=debug --verbose "${target}" 2>&1 | tee "$log"
+          fi
+          if grep -q "No specifications found" "$log"; then
+            echo "ERROR: no gauge specs matched tags=${tags} target=${target}"
+            exit 1
+          fi
+        }
+
+        run_ginkgo() {
+          local tags="$1" path filter timeout="${GINKGO_TIMEOUT:-4h}"
+          path=$(ginkgo_test_path)
+          filter=$(ginkgo_label_filter "$tags")
+          prepare_ginkgo_ecosystem_s2i "$(params.SPECS)"
+          case "$tags" in
+            install|uninstall|upgrade)
+              path=tests/olm/
+              export CATALOG_SOURCE="$(params.CATALOG_SOURCE)" CHANNEL="$(params.CHANNEL)"
+              ;;
+          esac
+          find tests -name '*.test' -delete 2>/dev/null || true
+          export GOTMPDIR="${report_path}/gotmp"
+          mkdir -p "$GOTMPDIR"
+          export ARCH="$(params.ARCH)"
+          echo "ginkgo run --label-filter='${filter}' ${path} (ARCH=${ARCH})"
+          CI=true ARTIFACTS_DIR="${report_path}" GINKGO_PARALLEL=1 \
+            go run github.com/onsi/ginkgo/v2/ginkgo run \
+            --procs=1 \
+            --label-filter="$filter" --timeout="$timeout" --junit-report=junit-report.xml \
+            --output-dir="${report_path}" --randomize-all -v "$path"
+        }
+
+        save_results() {
+          echo "Result: ${taskRunName}=${status}"
+          echo "${taskRunName}: ${status}" > "$(workspaces.results.path)/${taskRunName}.result"
+          case "$FRAMEWORK" in
+            gauge)
+              [[ -f "${report_path}/xml-report/result.xml" ]] && \
+                cp "${report_path}/xml-report/result.xml" "$(workspaces.results.path)/${taskRunName}.xml"
+              [[ -f "${report_path}/gauge.log" ]] && \
+                cp "${report_path}/gauge.log" "$(workspaces.results.path)/${taskRunName}.log"
+              ;;
+            ginkgo)
+              [[ -f "${report_path}/junit-report.xml" ]] && \
+                cp "${report_path}/junit-report.xml" "$(workspaces.results.path)/${taskRunName}.xml"
+              local glog
+              for glog in "${report_path}"/*.log "${report_path}"/ginkgo*.out; do
+                [[ -f "$glog" ]] || continue
+                cp "$glog" "$(workspaces.results.path)/${taskRunName}-$(basename "$glog")"
+              done
+              ;;
+          esac
+        }
+
+        check_pac_secrets() {
+          local spec="$(params.SPECS)" tags="$(params.TAGS)" missing=() v
+          [[ "$spec" == *pac* ]] || return 0
+          if [[ "$tags" == *pac-github* || "$spec" == *pac-github* ]]; then
+            for v in PAC_GITHUB_TOKEN PAC_GITHUB_ORG; do [[ -n "${!v:-}" ]] || missing+=("$v"); done
+          elif [[ "$tags" == *pac-gitlab* || "$spec" == *pac-gitlab* ]]; then
+            for v in GITLAB_TOKEN GITLAB_GROUP_NAMESPACE GITLAB_PROJECT_ID GITLAB_WEBHOOK_TOKEN; do
+              [[ -n "${!v:-}" ]] || missing+=("$v")
+            done
+          else
+            for v in PAC_GITHUB_TOKEN PAC_GITHUB_ORG GITLAB_TOKEN GITLAB_GROUP_NAMESPACE GITLAB_PROJECT_ID GITLAB_WEBHOOK_TOKEN; do
+              [[ -n "${!v:-}" ]] || missing+=("$v")
+            done
+          fi
+          [[ ${#missing[@]} -eq 0 ]] || {
+            echo "ERROR: PAC tests require ./scripts/create-secrets.sh (CRED_SOURCE=local or vault)"
+            echo "  Missing: ${missing[*]}"
+            exit 1
+          }
+          echo "PAC credentials OK (${spec}, tags=${tags})"
+        }
+
+        # --- config ---
+        FRAMEWORK="$(params.TEST_FRAMEWORK)"; FRAMEWORK="${FRAMEWORK,,}"
+        case "$FRAMEWORK" in gauge|ginkgo) ;; *) echo "ERROR: TEST_FRAMEWORK must be gauge or ginkgo"; exit 1 ;; esac
+
+        if [[ "$FRAMEWORK" == ginkgo ]]; then
+          cd "$(workspaces.release-tests-ginkgo-git.path)"
+        else
+          cd "$(workspaces.release-tests-git.path)"
+        fi
+        echo "Working directory: $(pwd)"
+        [[ -f go.mod ]] || { echo "ERROR: release-tests repo not ready (missing go.mod)"; ls -la; exit 1; }
+
+        OSP_VER="$(params.OSP_VERSION)"
+        [[ -n "$OSP_VER" ]] || { echo "ERROR: OSP_VERSION required"; exit 1; }
+        CLI_ARCH=$(pod_arch)
+
+        if [[ "$FRAMEWORK" == ginkgo ]]; then
+          GIT_BRANCH="$(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)"
+        else
+          GIT_BRANCH="$(params.GIT_RELEASE_TESTS_BRANCH)"
+        fi
+        GIT_BRANCH="${GIT_BRANCH:-main}"
+
+        GOMODCACHE_ROOT="$(workspaces.gomod-cache.path)"
+
         status=fail
-
+        taskRunName="${TASKRUN_NAME}"
         report_path=$(mktemp -d)
 
-        if [[ $(echo $(params.RUN_AS) | tr -s  '[:upper:]'  '[:lower:]') == admin ]]; then
-            if [[ -n "${ADMIN_TOKEN:-}" ]]; then
-              echo -e "Logging in to cluster $(params.CLUSTER_NAME) with admin token"
-              oc login --token=$ADMIN_TOKEN $APISERVER --insecure-skip-tls-verify=true
-            else
-              echo -e "Logging in to cluster $(params.CLUSTER_NAME) as user '$ADMIN_NAME'"
-              oc login -u $ADMIN_NAME -p $ADMIN_PASSWORD $APISERVER --insecure-skip-tls-verify=true
-            fi
-        else
-            echo -e "Logging in to cluster $(params.CLUSTER_NAME) as user 'user'"
-            oc login -u user -p $USER_PASSWORD $APISERVER --insecure-skip-tls-verify=true
-        fi
+        echo "Framework: ${FRAMEWORK}  GOMOD cache root: ${GOMODCACHE_ROOT}"
+        [[ -f go.mod ]] || { echo "ERROR: go.mod missing in $(pwd)"; ls -la; exit 1; }
+        use_gomod_cache
+        prepare_toolchain
+        echo "Toolchain ready (oc/tkn ephemeral; go modules + gauge/ginkgo from shared PVC cache)"
+        require_tools
+        echo "Tools verified"
 
-        if [[ -n "$(params.OSP_VERSION)" ]]; then
-          export OSP_VERSION="$(params.OSP_VERSION)"
-        fi
+        taskRunName=$(oc get taskrun "${TASKRUN_NAME}" -n "${TASKRUN_NAMESPACE}" \
+          -o json 2>/dev/null | jq -r '.metadata.labels["tekton.dev/pipelineTask"] // empty' || true)
+        [[ -n "$taskRunName" ]] || taskRunName="${TASKRUN_NAME}"
+        echo "Resolved pipelineTask name: ${taskRunName}"
+        trap 'save_results' EXIT
 
-        clean() {
-          echo "Updating status of test result as $status"
-          echo "${taskRunName}: ${status}" > $(workspaces.results.path)/${taskRunName}.result
+        export ADMIN_NAME=${ADMIN_NAME:-kubeadmin} USER_PASSWORD=${USER_PASSWORD:-user}
+        export KUBECONFIG=$HOME/.kube/config OSP_VERSION="${OSP_VER}" PAC_VERSION="${OSP_VER}"
+        export CHAINS_REPOSITORY="$(params.CHAINS_REPOSITORY)" JIB_MAVEN_REPOSITORY="$(params.JIB_MAVEN_REPOSITORY)"
 
-          if [[ -f ${report_path}/xml-report/result.xml ]]; then
-            cp ${report_path}/xml-report/result.xml $(workspaces.results.path)/${taskRunName}.xml
-          fi
-          cp ${report_path}/gauge.log $(workspaces.results.path)/${taskRunName}.log
-        }
-        trap clean EXIT
+        check_pac_secrets
 
-        go mod download
-        gauge install go 2>&1 || true
+        echo "Logging in to cluster $(params.CLUSTER_NAME) as $(params.RUN_AS)"
+        login_cluster "$(params.RUN_AS)"
+        cleanup_stale_s2i_namespaces "$(params.SPECS)"
 
-        # Pre-compile test code so gauge-go runner can start quickly
-        echo "Pre-compiling test code..."
-        go build ./...
-
-        if [[ "$(params.TAGS)" == "install" ]] || [[ "$(params.TAGS)" == "uninstall" ]] || [[ "$(params.TAGS)" == "upgrade" ]] ; then
-           gauge_reports_dir=${report_path} logs_directory=${report_path} CATALOG_SOURCE=$(params.CATALOG_SOURCE) CHANNEL=$(params.CHANNEL) IS_DISCONNECTED=$(params.IS_DISCONNECTED) gauge run --tags="$(params.TAGS)" --log-level=debug --verbose $(params.SPECS)
-           status=pass
-        else
-           gauge_reports_dir=${report_path} logs_directory=${report_path} ARCH=$(params.ARCH) gauge run --tags="$(params.TAGS)" --max-retries-count=3 --retry-only "$(params.TAGS)" --log-level=debug --verbose $(params.SPECS)
-           status=pass
-        fi
+        tags="$(params.TAGS)"
+        case "$FRAMEWORK" in
+          gauge)  run_gauge "$tags" ;;
+          ginkgo) run_ginkgo "$tags" ;;
+        esac
+        status=pass

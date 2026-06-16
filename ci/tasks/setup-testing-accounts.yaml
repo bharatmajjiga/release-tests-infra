@@ -35,11 +35,17 @@ spec:
             secretKeyRef:
               key: api-url
               name: cluster-$(params.CLUSTER_NAME)
+              optional: true
       image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
       workingDir: $(workspaces.infra-git.path)
       script: |
           #!/usr/bin/env bash
           set -e -u -o pipefail
+
+          if [[ -z "${APISERVER:-}" ]]; then
+            echo "ERROR: secret cluster-$(params.CLUSTER_NAME) not found in namespace (check CLUSTER_NAME / setup-pipelines-ci.sh)"
+            exit 1
+          fi
 
           ADMIN_NAME=${ADMIN_NAME:-kubeadmin}
           if [[ -n "${ADMIN_TOKEN:-}" ]]; then
@@ -52,13 +58,13 @@ spec:
 
           config/auth/01-test-auth.sh
 
-          echo -e "\nLogin into cluster using this command: 'oc login -u $ADMIN_NAME -p $ADMIN_PASSWORD $APISERVER --insecure-skip-tls-verify=true'"
+          echo -e "\nLogin into cluster using credentials from secret cluster-$(params.CLUSTER_NAME) (kubeadmin-password / admin-token)."
           echo "Access the OpenShift web-console here: $(oc whoami --show-console)"
 
           echo -e "Use one of the following users to login:\n"
           echo "Username           | Password                | Cluster roles "
           echo "-------------------|-----------------------------------------"
-          echo "$ADMIN_NAME          | $ADMIN_PASSWORD | admin"
+          echo "$ADMIN_NAME          | (see cluster secret)  | admin"
           echo "consoledeveloper   | developer               | self-provisioner, view    "
           echo "pipelinesdeveloper | developer               | basic-user                "
           echo "user               | user                    | default                   "

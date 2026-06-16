@@ -1,0 +1,61 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: cleanup-pipelinerun
+spec:
+  params:
+    - name: PIPELINE_RUN
+      description: PipelineRun to delete ($(context.pipelineRun.name))
+    - name: DELETE_DELAY
+      description: Seconds to wait before deleting
+      default: "60"
+    - name: IMAGE
+      default: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+  steps:
+    - name: create-cleanup-job
+      image: $(params.IMAGE)
+      env:
+        - name: NAMESPACE
+          value: $(context.taskRun.namespace)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        pr="$(params.PIPELINE_RUN)"
+        delay="$(params.DELETE_DELAY)"
+        image="$(params.IMAGE)"
+        safe=$(printf '%s' "$pr" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//' | cut -c1-40)
+        job_name="cleanup-${safe}"
+
+        oc delete job "$job_name" -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
+
+        oc apply -f - <<EOF
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${job_name}
+          namespace: ${NAMESPACE}
+          labels:
+            app: pipelinerun-cleanup
+            tekton.dev/pipelineRun: ${pr}
+        spec:
+          ttlSecondsAfterFinished: 300
+          backoffLimit: 1
+          activeDeadlineSeconds: 300
+          template:
+            spec:
+              serviceAccountName: pipeline
+              restartPolicy: Never
+              containers:
+              - name: cleanup
+                image: ${image}
+                command: ["/bin/bash", "-ec"]
+                args:
+                - |
+                  echo "Waiting ${delay}s before deleting pipelinerun/${pr}..."
+                  sleep ${delay}
+                  oc delete pipelinerun ${pr} -n ${NAMESPACE} --ignore-not-found --wait=false \
+                    && echo "PipelineRun ${pr} deletion requested"
+        EOF
+
+        echo "Created cleanup job/${job_name} — will delete pipelinerun/${pr} after ${delay}s"

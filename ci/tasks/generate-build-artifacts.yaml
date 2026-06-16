@@ -13,6 +13,9 @@ spec:
       description: |
         Konflux index image URL, e.g.
         quay.io/openshift-pipeline/pipelines-index-4.21:v1.20.5
+    - name: OPERATOR_ENVIRONMENT
+      description: prod / redhat-operators skips custom catalog generation
+      default: pre-stage
   steps:
     - name: generate-catalog-source
       image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
@@ -20,28 +23,36 @@ spec:
           #!/usr/bin/env bash
           set -euo pipefail
 
+          CATALOG_SOURCE="$(params.CATALOG_SOURCE)"
+          OPERATOR_ENVIRONMENT="$(params.OPERATOR_ENVIRONMENT)"
           INDEX_IMAGE="$(params.KONFLUX_INDEX_IMAGE)"
+          OUT="$(workspaces.build-artifacts.path)/catalog-source.yaml"
+
+          if [[ "$OPERATOR_ENVIRONMENT" == "prod" || "$CATALOG_SOURCE" == "redhat-operators" ]]; then
+            echo "Skipping custom CatalogSource (env=${OPERATOR_ENVIRONMENT}, source=${CATALOG_SOURCE})"
+            exit 0
+          fi
 
           if [[ -z "$INDEX_IMAGE" ]]; then
-            echo "ERROR: KONFLUX_INDEX_IMAGE param is required"
+            echo "ERROR: KONFLUX_INDEX_IMAGE param is required for custom catalog source"
             exit 1
           fi
 
-          echo "Generating CatalogSource for index image: $INDEX_IMAGE"
+          echo "Generating CatalogSource '${CATALOG_SOURCE}' from index: ${INDEX_IMAGE}"
+          printf '%s\n' \
+            "apiVersion: operators.coreos.com/v1alpha1" \
+            "kind: CatalogSource" \
+            "metadata:" \
+            "  name: ${CATALOG_SOURCE}" \
+            "  namespace: openshift-marketplace" \
+            "spec:" \
+            "  sourceType: grpc" \
+            "  image: ${INDEX_IMAGE}" \
+            "  displayName: ${CATALOG_SOURCE}" \
+            "  updateStrategy:" \
+            "    registryPoll:" \
+            "      interval: 30m" \
+            > "$OUT"
 
-          cat <<EOF | tee $(workspaces.build-artifacts.path)/catalog-source.yaml
-          apiVersion: operators.coreos.com/v1alpha1
-          kind: CatalogSource
-          metadata:
-            name: $(params.CATALOG_SOURCE)
-            namespace: openshift-marketplace
-          spec:
-            sourceType: grpc
-            image: $INDEX_IMAGE
-            displayName: $(params.CATALOG_SOURCE)
-            updateStrategy:
-              registryPoll:
-                interval: 30m
-          EOF
-
-          echo "CatalogSource YAML generated at $(workspaces.build-artifacts.path)/catalog-source.yaml"
+          echo "CatalogSource YAML generated at ${OUT}"
+          cat "$OUT"

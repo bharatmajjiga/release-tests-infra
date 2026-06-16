@@ -4,63 +4,216 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 NAMESPACE="${NAMESPACE:-pipelines-ci}"
+FORCE=false MODE=full
 
-# --- Load .env ---
-if [[ -f "$REPO_ROOT/.env" ]]; then
-  set -a; source "$REPO_ROOT/.env"; set +a
-fi
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --pvc-only)
+      echo "NOTE: shared toolchain PVC removed; use ./scripts/cleanup-pipeline-pvcs.sh --legacy-only"
+      exec "$SCRIPT_DIR/cleanup-pipeline-pvcs.sh" --legacy-only --namespace "$NAMESPACE"
+      ;;
+    --cluster-secret-only) MODE=cluster; shift ;;
+    --force) FORCE=true; shift ;;
+    -h|--help)
+      cat <<EOF
+Usage: $0 [--cluster-secret-only] [--force]
 
-# --- Resolve values (env > prompt) ---
-API_URL="${APISERVER:-$(oc whoami --show-server 2>/dev/null || echo "")}"
-KUBE_PASS="${KUBEADMIN_PASSWORD:-}"
-KUBE_USER="${KUBEADMIN_USER:-kubeadmin}"
-CLUSTER_NAME="${CLUSTER_NAME:-$(echo "$API_URL" | sed -n 's|https\{0,1\}://api\.\([^.]*\)\..*|\1|p')}"
-if [[ -z "$CLUSTER_NAME" ]]; then
-  read -rp "Cluster name: " CLUSTER_NAME
-fi
+  default:               cluster secret + Tekton tasks/pipeline
+  --cluster-secret-only: cluster-\${CLUSTER_NAME} secret only (from .env)
+  --force:               recreate cluster secret if it exists
+  --pvc-only:            (deprecated) run ./scripts/cleanup-pipeline-pvcs.sh --legacy-only
 
-echo "=== Setting up namespace: $NAMESPACE ==="
-oc get namespace "$NAMESPACE" &>/dev/null || oc new-project "$NAMESPACE"
-oc project "$NAMESPACE"
+  CLUSTER_PLATFORMS=true  → cluster-platforms, cluster-ca-cert, OC_TOKEN in secret
+  CLUSTER_PLATFORMS=false → skips update if secret already has cluster-platforms=true
 
-# --- Cluster secret ---
-SECRET_NAME="cluster-${CLUSTER_NAME}"
-echo "Cluster: $CLUSTER_NAME"
+  INSTALL_PIPELINES_OPERATOR=true runs operator install before Tekton apply (default from .env)
+EOF
+      exit 0 ;;
+    *) echo "ERROR: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
 
-if oc get secret "$SECRET_NAME" -n "$NAMESPACE" &>/dev/null; then
-  echo "Secret '$SECRET_NAME' already exists in namespace '$NAMESPACE'. Skipping creation."
-else
-  if [[ -z "$KUBE_PASS" ]]; then
-    echo "ERROR: KUBEADMIN_PASSWORD not set. Add it to .env"
-    exit 1
+die() { echo "ERROR: $*" >&2; exit 1; }
+[[ -f "$REPO_ROOT/.env" ]] || die "missing $REPO_ROOT/.env"
+set -a; source "$REPO_ROOT/.env"; set +a
+NAMESPACE="${NAMESPACE:-pipelines-ci}"
+command -v oc >/dev/null || die "oc CLI required"
+# shellcheck source=cluster-login.sh
+source "$SCRIPT_DIR/cluster-login.sh"
+
+ensure_namespace() {
+  oc get namespace "$NAMESPACE" &>/dev/null \
+    && echo "Namespace ${NAMESPACE} exists" \
+    || { echo "Creating namespace ${NAMESPACE}..."; oc new-project "$NAMESPACE"; }
+  oc project "$NAMESPACE" >/dev/null
+}
+
+create_cluster_secret() {
+  [[ -n "${CLUSTER_NAME:-}" ]] || die "CLUSTER_NAME required in .env"
+  [[ -n "${APISERVER:-}" ]] || die "APISERVER required in .env"
+  local secret existing args platforms
+  secret="$(cluster_secret_name)" || die "CLUSTER_NAME required in .env"
+
+  echo "Checking for secret ${secret} in ${NAMESPACE}..."
+  if cluster_secret_exists "$NAMESPACE"; then
+    existing="$(secret_cluster_platforms "$secret" "$NAMESPACE")"
+    if ! cluster_platforms && [[ "$(printf '%s' "$existing" | tr '[:upper:]' '[:lower:]')" == true ]]; then
+      echo "Secret ${secret} has cluster-platforms=true; .env CLUSTER_PLATFORMS=false — skipping"
+      return 0
+    fi
+    [[ "$FORCE" == true ]] || { echo "Secret ${secret} already exists in ${NAMESPACE} (use --force to recreate)"; return 0; }
+    echo "Deleting secret ${secret}..."
+    oc delete secret "$secret" -n "$NAMESPACE"
   fi
 
+  validate_cluster_env || die "cluster env validation failed"
   echo "=== Verifying cluster login ==="
-  oc login -u "${KUBE_USER}" -p "${KUBE_PASS}" "${API_URL}" --insecure-skip-tls-verify=true
-  OC_TOKEN=$(oc whoami -t)
-  echo "  Login successful ($(oc whoami) @ ${API_URL})"
+  cluster_login || die "cluster login failed"
 
-  oc create secret generic "$SECRET_NAME" \
-    --from-literal=admin-name="${KUBE_USER}" \
-    --from-literal=api-url="${API_URL}" \
-    --from-literal=admin-token="${OC_TOKEN}" \
-    --from-literal=kubeadmin-password="${KUBE_PASS}" \
-    --from-literal=user-password="${USER_PASSWORD:-user}" \
-    --from-literal=insecure-skip-tls-verify=true \
-    --from-literal=installer=none \
-    --from-literal=mirror-reg=quay.io \
-    -n "$NAMESPACE"
-  oc label secret "$SECRET_NAME" keep-cluster=true -n "$NAMESPACE"
-  echo "Created secret '$SECRET_NAME'"
-fi
+  platforms=$(cluster_platforms_flag)
+  echo "=== Creating secret ${secret} (cluster-platforms=${platforms}) ==="
 
-# --- Tekton resources ---
+  args=(
+    --from-literal=admin-name="$(cluster_admin_name)"
+    --from-literal=api-url="${APISERVER}"
+    --from-literal=admin-token="$(cluster_admin_token)"
+    --from-literal=kubeadmin-password="${KUBEADMIN_PASSWORD:-}"
+    --from-literal=user-password="${USER_PASSWORD:-user}"
+    --from-literal=insecure-skip-tls-verify="$(cluster_insecure_tls)"
+    --from-literal=cluster-platforms="${platforms}"
+    --from-literal=installer=none
+    --from-literal=mirror-reg=quay.io
+  )
+  cluster_platforms && args+=(--from-file=cluster-ca-cert="$(cluster_ca_path)")
+
+  oc create secret generic "$secret" "${args[@]}" -n "$NAMESPACE"
+  oc label secret "$secret" keep-cluster=true -n "$NAMESPACE" --overwrite
+  echo "Created secret ${secret}"
+}
+
+resolve_channel() {
+  [[ -n "${OPERATOR_VERSION:-}" ]] || die "OPERATOR_VERSION required for operator install"
+  if [[ -z "${CHANNEL:-}" || "${CHANNEL}" == latest ]]; then
+    CHANNEL="pipelines-${OPERATOR_VERSION%.*}"
+    export CHANNEL
+    echo "CHANNEL=${CHANNEL} (from OPERATOR_VERSION=${OPERATOR_VERSION})"
+  fi
+}
+
+apply_custom_catalog() {
+  local env="${OPERATOR_ENVIRONMENT:-pre-stage}" src="${CATALOG_SOURCE:-redhat-operators}" pod yaml
+  [[ "$env" == prod || "$src" == redhat-operators ]] && return 0
+  [[ -n "${KONFLUX_INDEX_IMAGE:-}" ]] || die "KONFLUX_INDEX_IMAGE required when OPERATOR_ENVIRONMENT != prod"
+
+  yaml=$(mktemp "${TMPDIR:-/tmp}/catalog.XXXXXX")
+  cat >"$yaml" <<EOF
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: ${src}
+  namespace: openshift-marketplace
+spec:
+  sourceType: grpc
+  image: ${KONFLUX_INDEX_IMAGE}
+  displayName: ${src}
+  updateStrategy:
+    registryPoll:
+      interval: 30m
+EOF
+  echo "Applying CatalogSource ${src} (${KONFLUX_INDEX_IMAGE})"
+  oc apply -f "$yaml"
+  rm -f "$yaml"
+  echo "Waiting for CatalogSource ${src}..."
+  if ! oc wait "catalogsource/${src}" -n openshift-marketplace --for=condition=Ready --timeout=5m 2>/dev/null; then
+    pod=$(oc get pods -n openshift-marketplace --sort-by='{.metadata.creationTimestamp}' -o name \
+      | grep "${src}" | tail -1 || true)
+    [[ -n "$pod" ]] || die "no catalog pod for ${src}"
+    oc wait --for=condition=Ready -n openshift-marketplace "$pod" --timeout=5m
+  fi
+}
+
+install_pipelines_operator() {
+  [[ "$(printf '%s' "${INSTALL_PIPELINES_OPERATOR:-false}" | tr '[:upper:]' '[:lower:]')" == true ]] || {
+    echo "Skipping operator install (INSTALL_PIPELINES_OPERATOR=${INSTALL_PIPELINES_OPERATOR:-false})"
+    return 0
+  }
+
+  resolve_channel
+  validate_cluster_env || die "cluster env validation failed"
+  cluster_login || die "cluster login failed"
+
+  local csv phase
+  csv=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators \
+    -o jsonpath='{.status.currentCSV}' 2>/dev/null || true)
+  if [[ -n "$csv" && "$csv" == *"${OPERATOR_VERSION}"* ]]; then
+    phase=$(oc get "csv/${csv}" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    if [[ "$phase" == Succeeded ]]; then
+      echo "Operator ${OPERATOR_VERSION} already installed (${csv})"
+      return 0
+    fi
+  fi
+
+  echo "=== Installing OpenShift Pipelines operator (${OPERATOR_VERSION}, ${CATALOG_SOURCE}/${CHANNEL}) ==="
+  apply_custom_catalog
+  CHANNEL="${CHANNEL}" CATALOG_SOURCE="${CATALOG_SOURCE:-redhat-operators}" \
+    bash "$REPO_ROOT/config/operators/install-pipelines.sh"
+}
+
+verify_pipelines_install() {
+  local n deadline=$((SECONDS + 600))
+  echo "=== Verifying OpenShift Pipelines install ==="
+  while (( SECONDS < deadline )); do
+    if oc get tektonconfig config &>/dev/null; then
+      oc wait tektonconfig/config --for=condition=Ready --timeout=60s 2>/dev/null && break
+    else
+      echo "  waiting for TektonConfig..." >&2
+    fi
+  done
+  oc get tektonconfig config 2>/dev/null || die "TektonConfig config not found — operator install incomplete"
+  [[ "$(oc get tektonconfig config --no-headers | awk '{print $3}')" == True ]] \
+    || die "TektonConfig not Ready"
+  n=$(oc get tektoninstallersets --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  [[ "${n:-0}" -gt 0 ]] || die "no TektonInstallerSets found"
+  echo "OK: TektonConfig Ready; ${n} TektonInstallerSet(s) present"
+}
+
+enable_pipelines_console_plugin() {
+  [[ "$(printf '%s' "${INSTALL_PIPELINES_OPERATOR:-false}" | tr '[:upper:]' '[:lower:]')" == true ]] || return 0
+
+  local env="${OPERATOR_ENVIRONMENT:-pre-stage}" plugin=pipelines-console-plugin
+  if [[ "$env" == prod ]]; then
+    echo "Skipping console plugin patch (OPERATOR_ENVIRONMENT=prod — enabled by default)"
+    return 0
+  fi
+
+  if oc get consoles.operator.openshift.io cluster -o jsonpath='{range .spec.plugins[*]}{.}{"\n"}{end}' 2>/dev/null \
+    | grep -qxF "$plugin"; then
+    echo "Console plugin ${plugin} already enabled"
+    return 0
+  fi
+
+  echo "=== Enabling ${plugin} on OpenShift console ==="
+  oc patch consoles.operator.openshift.io cluster \
+    -p '{"spec":{"plugins":["pipelines-console-plugin"]}}' \
+    --type=merge
+  echo "Console plugin ${plugin} enabled"
+}
+
+case "$MODE" in
+  cluster) ensure_namespace; create_cluster_secret; exit 0 ;;
+esac
+
+ensure_namespace
+create_cluster_secret
+install_pipelines_operator
+verify_pipelines_install
+enable_pipelines_console_plugin
+
 echo "=== Applying Tekton Tasks & Pipeline ==="
 oc apply -f "$REPO_ROOT/ci/tasks/" -n "$NAMESPACE"
 oc apply -f "$REPO_ROOT/ci/pipelines/" -n "$NAMESPACE"
-
 oc get tasks,pipelines -n "$NAMESPACE" -o custom-columns=KIND:.kind,NAME:.metadata.name --no-headers | sed 's/^/  /'
 
 echo "=== Setup complete ==="
 echo "Run acceptance tests:"
-echo "  oc create -f ci/pipelineruns/acceptance-tests-install.yaml -n $NAMESPACE"
+echo "  ./scripts/create-pipelinerun.sh"

@@ -1,140 +1,88 @@
 # release-tests-infra
 
-Decentralized CI infrastructure for running OpenShift Pipelines acceptance tests on any cluster (amd64, arm64, ppc64le, s390x).
+Decentralized CI for OpenShift Pipelines acceptance tests on any cluster (amd64, arm64, ppc64le, s390x).
 
 ## Workflow
 
 ```
-env.template (.env)  ← single source of truth for all configuration
+.env (from env.template)
       │
       ▼
-┌─────────────────────────────────────────────────────┐
-│  run-workflow.sh                                    │
-│                                                     │
-│  1. Clone release-tests-infra + release-tests repos │
-│  2. Install operator via gauge                      │
-│     CATALOG_SOURCE=... CHANNEL=... gauge run        │
-│       --tags install specs/olm.spec                 │
-│  3. Install External Secrets Operator (Vault)       │
-│  4. Create individual K8s secrets from Vault        │
-│  5. Setup pipelines-ci (namespace + tasks + pipeline│
-└─────────────────────────────────────────────────────┘
+run-workflow.sh
+  1. create-secrets.sh     — K8s secrets from .env or Vault
+  2. setup-pipelines-ci.sh — namespace, cluster secret, Tekton tasks + pipeline
+  3. create-pipelinerun.sh — PipelineRun from .env (no static YAML to maintain)
 ```
 
 ## Quick Start
 
 ```bash
-# 1. Configure
 cp env.template .env
-# Edit .env — set APISERVER, ADMIN_TOKEN, OPERATOR_VERSION, etc.
+# Edit .env — cluster, operator, test branches, secrets
 
-# 2. Run the full workflow
 ./scripts/run-workflow.sh
 ```
 
-This will:
-- Clone `release-tests` at the branch matching your `OPERATOR_VERSION`
-- Install the operator using gauge (`CATALOG_SOURCE` + `CHANNEL` from `.env`)
-- Set up Vault-backed secrets (if `VAULT_TOKEN` is set)
-- Apply Tekton tasks and pipeline to `pipelines-ci`
+Or step by step:
 
-## Configuration (env.template)
+```bash
+source .env
+./scripts/create-secrets.sh
+./scripts/setup-pipelines-ci.sh
+./scripts/create-pipelinerun.sh
+```
 
-All values are defined in `env.template`. Copy to `.env` and fill in:
+## Configuration
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `APISERVER` | Cluster API URL | `https://api.mycluster.example.com:6443` |
-| `ADMIN_TOKEN` | Admin token (`oc whoami -t`) | `sha256~xxx` |
-| `ARCH` | Cluster architecture | `linux/arm64` |
-| `CATALOG_SOURCE` | OLM CatalogSource name | `custom-operators` |
-| `CHANNEL` | Operator subscription channel | `latest` |
-| `OPERATOR_VERSION` | Pipelines operator version | `1.22.0` |
-| `OPERATOR_ENVIRONMENT` | Environment (prod/stage/pre-stage) | `prod` |
-| `GIT_RELEASE_TESTS_BRANCH` | release-tests branch | `release-v1.22` |
-| `GIT_INFRA_BRANCH` | release-tests-infra branch | `main` |
-| `IMAGE` | Container image for test runner | `registry.access.redhat.com/ubi9/go-toolset:latest` |
-| `KONFLUX_INDEX_IMAGE` | Konflux index image URL | `quay.io/openshift-pipeline/pipelines-index-4.21:v1.20.5` |
-| `TKN_DOWNLOAD_URL` | TKN CLI download URL | `https://developers.qa.redhat.com/...` |
-| `VAULT_TOKEN` | Vault token for secrets | `hvs.xxx` |
-
-See `env.template` for the full list including GitHub, GitLab, Quay, Brew, AWS, Polarion, ReportPortal, etc.
+All values live in `env.template` / `.env`. See `env.template` for the full list.
 
 ## Running Tests
 
-### Option 1: Full workflow (recommended)
+PipelineRuns are created dynamically by `create-pipelinerun.sh` (reads `.env`, per-run workspace PVC).
+
 ```bash
-source .env
-./scripts/run-workflow.sh
+./scripts/create-pipelinerun.sh
+oc get pipelinerun -n pipelines-ci -w
 ```
 
-### Option 2: Tekton PipelineRun
-```bash
-# After setup-pipelines-ci.sh has run:
-oc create -f ci/pipelineruns/acceptance-tests-install.yaml -n pipelines-ci
-```
-Values in `acceptance-tests-install.yaml` should mirror your `.env`.
+Cleanup workspace PVCs after runs:
 
-### Option 3: Local gauge run
 ```bash
-source .env
-cd /path/to/release-tests
-go mod download && go build ./...
-CATALOG_SOURCE=$CATALOG_SOURCE CHANNEL=$CHANNEL \
-  gauge run --log-level=debug --verbose --tags install specs/olm.spec
+./scripts/cleanup-pipeline-pvcs.sh --finished
+./scripts/cleanup-pipeline-pvcs.sh --pipelinerun acceptance-tests-abc12
 ```
 
 ## Repository Structure
 
 ```
 release-tests-infra/
-├── env.template                     # Single source of truth for all config
-├── .env                             # Local copy (gitignored)
-│
+├── env.template / .env          # Configuration (not committed)
 ├── scripts/
-│   ├── run-workflow.sh              # Full workflow: clone → install → ESO → secrets → setup
-│   ├── setup-pipelines-ci.sh        # Namespace + cluster secret + tasks + pipeline
-│   ├── install-external-secrets-operator.sh  # ESO + Vault SecretStore + ExternalSecret
-│   └── create-secrets.sh            # Individual K8s secrets from Vault cluster-creds
-│
+│   ├── run-workflow.sh          # Full workflow
+│   ├── setup-pipelines-ci.sh    # Namespace + cluster secret + Tekton apply
+│   ├── create-secrets.sh        # Secrets from .env or Vault
+│   ├── create-pipelinerun.sh    # Create PipelineRun from .env
+│   ├── cluster-login.sh         # Shared oc login helpers
+│   └── cleanup-pipeline-pvcs.sh # Remove per-run workspace PVCs
 ├── ci/
-│   ├── pipelines/
-│   │   └── acceptance-tests.yaml    # Main Tekton pipeline
-│   ├── pipelineruns/
-│   │   └── acceptance-tests-install.yaml  # PipelineRun (values from env.template)
-│   └── tasks/
-│       ├── release-tests.yaml            # Runs gauge tests
-│       ├── setup-testing-accounts.yaml   # Creates test users
-│       ├── configure-operator.yaml       # Applies CatalogSource
-│       └── generate-build-artifacts.yaml # Generates CatalogSource YAML
-│
-├── secrets/                         # K8s Secret YAML templates (sed-substituted)
-│   ├── aws.yaml, github.yaml, pac-gitlab.yaml, ...
-│   └── (16 secret templates)
-│
-├── config/                          # Cluster configuration
-│   ├── auth/                        # Authentication (01-test-auth.sh used by Tekton)
-│   ├── operators/                   # Manual operator install scripts
-│   ├── roles/                       # RBAC helpers
-│   └── chrony/                      # NTP MachineConfigs
-│
-└── ci-config.yaml                   # Version matrix reference
+│   ├── pipelines/acceptance-tests.yaml
+│   └── tasks/                   # Tekton tasks (release-tests, evaluate, …)
+├── secrets/                     # Secret templates ($VAR placeholders)
+└── config/
+    ├── auth/                    # Test users (used by setup-testing-accounts task)
+    ├── cluster-ca/              # Optional CA for CLUSTER_PLATFORMS=true
+    └── operators/               # install-pipelines.sh, uninstall-pipelines.sh
 ```
 
-## Secrets Flow
+## Secrets
 
 ```
-Vault (vault.ci.openshift.org)
-  ↓ VAULT_TOKEN
-osp-ci-secrets/cluster-creds (synced via ExternalSecret)
-  ↓ create-secrets.sh
-pipelines-ci/ (16 individual K8s secrets)
-  ↓ envFrom + secretKeyRef
-release-tests task (gauge tests)
+.env (CRED_SOURCE=local)  or  Vault (CRED_SOURCE=vault)
+  → create-secrets.sh
+  → pipelines-ci namespace
+  → release-tests task (PAC, GitHub, GitLab, …)
 ```
 
-## Multi-arch Support
+## Multi-arch
 
-The test runner image `ubi9/go-toolset:latest` supports amd64, arm64, ppc64le, s390x. Tools (`oc`, `gauge`) are auto-installed at runtime:
-- `oc` version is matched to the cluster's OpenShift version
-- `gauge` is built from source via `go install` (works on all architectures)
+Test runner image `ubi9/go-toolset:latest` supports amd64, arm64, ppc64le, s390x. `oc`, `gauge`, and `ginkgo` are installed at runtime in the pipeline.
