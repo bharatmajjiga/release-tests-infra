@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SECRETS_DIR="$REPO_ROOT/secrets"
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
 NAMESPACE="${NAMESPACE:-pipelines-ci}"
@@ -178,6 +178,91 @@ need SLACK_WEBHOOK_URL && apply_secret sed -e "s|\$SLACK_WEBHOOK_URL|${SLACK_WEB
 need UPLOADER_USERNAME UPLOADER_PASSWORD UPLOADER_HOST && apply_secret sed \
   -e "s|\$UPLOADER_USERNAME|${UPLOADER_USERNAME}|" -e "s|\$UPLOADER_PASSWORD|${UPLOADER_PASSWORD}|" \
   -e "s|\$UPLOADER_HOST|${UPLOADER_HOST}|" "$SECRETS_DIR/uploader.yaml"
+
+# AWS IPI provisioning secrets (INSTALLER=aws-ipi)
+if [[ "$(printf '%s' "${INSTALLER:-none}" | tr '[:upper:]' '[:lower:]')" == aws-ipi ]]; then
+  need AWS_ACCESS_KEY AWS_ACCESS_SECRET || die "INSTALLER=aws-ipi requires AWS_ACCESS_KEY + AWS_ACCESS_SECRET (set in .env or Vault)"
+
+  echo "Creating aws-creds secret for INSTALLER=aws-ipi..."
+  oc create secret generic aws-creds \
+    --from-literal=aws-access-key-id="${AWS_ACCESS_KEY}" \
+    --from-literal=aws-secret-access-key="${AWS_ACCESS_SECRET}" \
+    --dry-run=client -o yaml | oc apply -n "$NAMESPACE" -f -
+  CREATED=$((CREATED + 1))
+
+  # Pull secret: .env → management cluster's openshift-config/pull-secret
+  _PULL="${PULL_SECRET:-}"
+  if [[ -z "$_PULL" ]]; then
+    echo "  PULL_SECRET not in .env — extracting from cluster openshift-config/pull-secret..."
+    _PULL=$(oc get secret pull-secret -n openshift-config \
+      -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d) || true
+  fi
+  [[ -n "$_PULL" ]] || die "PULL_SECRET required: set in .env or ensure openshift-config/pull-secret exists on management cluster"
+
+  # SSH public key: .env → Vault ssh-publickey
+  _SSH="${SSH_PUBLIC_KEY:-}"
+  if [[ -z "$_SSH" ]] && [[ -n "${ssh_publickey:-}" ]]; then
+    _SSH="$ssh_publickey"
+  fi
+  # Vault stores it as ssh-publickey (with hyphen); try the env var that vault_sync would set
+  if [[ -z "$_SSH" ]] && command -v vault &>/dev/null && [[ -n "${VAULT_TOKEN:-}" ]]; then
+    echo "  SSH_PUBLIC_KEY not in .env — extracting from Vault ssh-publickey..."
+    _SSH=$(vault kv get -format=json "${VAULT_KV_MOUNT:-kv}/${VAULT_KV_PATH:-selfservice/openshift-pipelines/osp-ci-secrets}" \
+      2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data']['ssh-publickey'])" 2>/dev/null) || true
+  fi
+  [[ -n "$_SSH" ]] || die "SSH_PUBLIC_KEY required: set in .env or store ssh-publickey in Vault"
+
+  echo "Creating aws-install-config secret (pull-secret: ${#_PULL} chars, ssh-key: ${#_SSH} chars)..."
+  oc create secret generic aws-install-config \
+    --from-literal=pull-secret="${_PULL}" \
+    --from-literal=ssh-public-key="${_SSH}" \
+    --dry-run=client -o yaml | oc apply -n "$NAMESPACE" -f -
+  CREATED=$((CREATED + 1))
+fi
+
+# ARO provisioning secrets (INSTALLER=aro)
+if [[ "$(printf '%s' "${INSTALLER:-none}" | tr '[:upper:]' '[:lower:]')" == aro ]]; then
+  # Azure creds: .env → Vault
+  _AZ_TENANT="${AZURE_TENANT:-}"
+  _AZ_USER="${AZURE_USERNAME:-}"
+  _AZ_PASS="${AZURE_PASSWORD:-}"
+
+  if [[ -z "$_AZ_TENANT" || -z "$_AZ_USER" || -z "$_AZ_PASS" ]] && command -v vault &>/dev/null && [[ -n "${VAULT_TOKEN:-}" ]]; then
+    echo "Azure creds not in .env — extracting from Vault..."
+    _vault_json=$(vault kv get -format=json "${VAULT_KV_MOUNT:-kv}/${VAULT_KV_PATH:-selfservice/openshift-pipelines/osp-ci-secrets}" 2>/dev/null || true)
+    if [[ -n "$_vault_json" ]]; then
+      [[ -z "$_AZ_TENANT" ]] && _AZ_TENANT=$(echo "$_vault_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data'].get('AZURE_TENANT',''))" 2>/dev/null || true)
+      [[ -z "$_AZ_USER" ]] && _AZ_USER=$(echo "$_vault_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data'].get('AZURE_USERNAME',''))" 2>/dev/null || true)
+      [[ -z "$_AZ_PASS" ]] && _AZ_PASS=$(echo "$_vault_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data'].get('AZURE_PASSWORD',''))" 2>/dev/null || true)
+    fi
+  fi
+  [[ -n "$_AZ_TENANT" && -n "$_AZ_USER" && -n "$_AZ_PASS" ]] \
+    || die "INSTALLER=aro requires AZURE_TENANT, AZURE_USERNAME, AZURE_PASSWORD (set in .env or Vault)"
+
+  echo "Creating azure-creds secret..."
+  oc create secret generic azure-creds \
+    --from-literal=azure-tenant="${_AZ_TENANT}" \
+    --from-literal=azure-username="${_AZ_USER}" \
+    --from-literal=azure-password="${_AZ_PASS}" \
+    --dry-run=client -o yaml | oc apply -n "$NAMESPACE" -f -
+  CREATED=$((CREATED + 1))
+
+  # Pull secret for ARO (reuses same logic as aws-ipi)
+  _PULL="${PULL_SECRET:-}"
+  if [[ -z "$_PULL" ]]; then
+    echo "  PULL_SECRET not in .env — extracting from cluster openshift-config/pull-secret..."
+    _PULL=$(oc get secret pull-secret -n openshift-config \
+      -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d) || true
+  fi
+  if [[ -n "$_PULL" ]]; then
+    echo "Creating aws-install-config secret for pull-secret (${#_PULL} chars)..."
+    oc create secret generic aws-install-config \
+      --from-literal=pull-secret="${_PULL}" \
+      --from-literal=ssh-public-key="" \
+      --dry-run=client -o yaml | oc apply -n "$NAMESPACE" -f -
+    CREATED=$((CREATED + 1))
+  fi
+fi
 
 [[ "$CREATED" -eq 0 ]] \
   && echo "No secrets created. Set CRED_SOURCE=local with secret vars in .env, or CRED_SOURCE=vault." \

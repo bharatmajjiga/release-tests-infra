@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup-orphan-clusters
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          serviceAccountName: pipeline
+          restartPolicy: Never
+          containers:
+            - name: trigger
+              image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  curl -s -X POST \
+                    http://el-cleanup-orphan-clusters.pipelines-ci.svc:8080 \
+                    -H "Content-Type: application/json" \
+                    -d '{"max_age_hours":"6","dry_run":"false"}'

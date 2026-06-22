@@ -1,0 +1,28 @@
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: TriggerTemplate
+metadata:
+  name: cleanup-orphan-clusters
+spec:
+  params:
+    - name: max_age_hours
+      default: "6"
+    - name: dry_run
+      default: "false"
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: TaskRun
+      metadata:
+        generateName: cleanup-orphan-clusters-
+        labels:
+          triggers.tekton.dev/eventlistener: cleanup-orphan-clusters
+      spec:
+        taskRef:
+          name: destroy-cluster
+        params:
+          - name: CLUSTER_NAME
+            value: ""
+          - name: MAX_AGE_HOURS
+            value: $(tt.params.max_age_hours)
+          - name: DRY_RUN
+            value: $(tt.params.dry_run)
+        timeout: 30m

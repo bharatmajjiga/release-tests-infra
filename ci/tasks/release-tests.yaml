@@ -265,16 +265,6 @@ spec:
           local key_file="${GOMODCACHE_ROOT}/.${FRAMEWORK}.cache-key"
           local ready_file="${GOMODCACHE_ROOT}/.${FRAMEWORK}.cache-ready"
 
-          if [[ -d vendor ]]; then
-            computed=$(gomod_hash .)
-            key="${GOMODCACHE_ROOT}/${computed}/gomod"
-            tools="${GOMODCACHE_ROOT}/${computed}/tools/bin"
-            export GOMODCACHE="$key" CACHED_TOOLS_BIN="$tools"
-            echo "Using vendored dependencies in $(pwd)"
-            return
-          fi
-
-          # Use the cache key from go-mod-cache (same PVC subPath for all test TaskRuns).
           local deadline=$((SECONDS + 900))
           while (( SECONDS < deadline )); do
             [[ -f "$ready_file" && -f "$key_file" ]] && break
@@ -285,23 +275,27 @@ spec:
             || { echo "ERROR: shared cache not ready (missing ${key_file} or ${ready_file})"; exit 1; }
 
           cache_id=$(tr -d '[:space:]' < "$key_file")
-          computed=$(gomod_hash .) || { echo "ERROR: go.mod missing in $(pwd)"; exit 1; }
-          if [[ "$computed" != "$cache_id" ]]; then
-            echo "WARN: go.mod hash drift: repo=${computed} download=${cache_id} (using download cache key)"
-          fi
-
           key="${GOMODCACHE_ROOT}/${cache_id}/gomod"
           tools="${GOMODCACHE_ROOT}/${cache_id}/tools/bin"
           gauge_home="${GOMODCACHE_ROOT}/${cache_id}/gauge-home"
-          [[ -f "${key}/.ready" && -f "${tools}/.ready" ]] \
-            || { echo "ERROR: cache markers missing under ${GOMODCACHE_ROOT}/${cache_id}/"; exit 1; }
+
+          [[ -f "${tools}/.ready" ]] \
+            || { echo "ERROR: tools cache not ready at ${tools}"; exit 1; }
 
           export GOMODCACHE="$key" CACHED_TOOLS_BIN="$tools"
+
+          if [[ -d vendor ]]; then
+            echo "Using vendored dependencies in $(pwd)"
+          else
+            [[ -f "${key}/.ready" ]] \
+              || { echo "ERROR: gomod cache not ready at ${key}"; exit 1; }
+            echo "Using cached go modules: ${GOMODCACHE} (hash=${cache_id})"
+          fi
+
           if [[ "$FRAMEWORK" == gauge && -f "${gauge_home}/.ready" ]]; then
             export GAUGE_HOME="$gauge_home"
           fi
-          echo "Using cached go modules: ${GOMODCACHE} (hash=${cache_id})"
-          echo "Using cached test tools: ${CACHED_TOOLS_BIN}"
+          echo "Using cached tools: ${CACHED_TOOLS_BIN}"
         }
 
         prepare_toolchain() {
@@ -365,16 +359,21 @@ spec:
         }
 
         login_cluster() {
-          local run_as="${1,,}"
+          local run_as="${1,,}" rc=0
           if [[ "$run_as" == admin ]]; then
             if [[ -n "${ADMIN_TOKEN:-}" ]]; then
-              oc login --token="$ADMIN_TOKEN" "$APISERVER" --insecure-skip-tls-verify=true
+              oc login --token="$ADMIN_TOKEN" "$APISERVER" --insecure-skip-tls-verify=true >/dev/null 2>&1 || rc=$?
             else
-              oc login -u "$ADMIN_NAME" -p "$ADMIN_PASSWORD" "$APISERVER" --insecure-skip-tls-verify=true
+              oc login -u "$ADMIN_NAME" -p "$ADMIN_PASSWORD" "$APISERVER" --insecure-skip-tls-verify=true >/dev/null 2>&1 || rc=$?
             fi
           else
-            oc login -u user -p "$USER_PASSWORD" "$APISERVER" --insecure-skip-tls-verify=true
+            oc login -u user -p "$USER_PASSWORD" "$APISERVER" --insecure-skip-tls-verify=true >/dev/null 2>&1 || rc=$?
           fi
+          if [[ $rc -ne 0 ]]; then
+            echo "ERROR: oc login failed (exit $rc) for ${run_as} on ${APISERVER}"
+            return $rc
+          fi
+          echo "Logged in as $(oc whoami) on $(oc whoami --show-server)"
         }
 
         run_gauge() {
@@ -413,9 +412,16 @@ spec:
           export GOTMPDIR="${report_path}/gotmp"
           mkdir -p "$GOTMPDIR"
           export ARCH="$(params.ARCH)"
+
+          # runtime.Caller in config.go returns relative path "workspace/release-tests-ginkgo-git/..."
+          # which gets joined with CWD, doubling the path. Create a symlink so the doubled path resolves.
+          if [[ "$(pwd)" == */workspace/* ]] && [[ ! -e "$(pwd)/workspace" ]]; then
+            ln -sf /workspace "$(pwd)/workspace"
+          fi
+
           echo "ginkgo run --label-filter='${filter}' ${path} (ARCH=${ARCH})"
           CI=true ARTIFACTS_DIR="${report_path}" GINKGO_PARALLEL=1 \
-            go run github.com/onsi/ginkgo/v2/ginkgo run \
+            ginkgo run \
             --procs=1 \
             --label-filter="$filter" --timeout="$timeout" --junit-report=junit-report.xml \
             --output-dir="${report_path}" --randomize-all -v "$path"
@@ -458,7 +464,7 @@ spec:
             done
           fi
           [[ ${#missing[@]} -eq 0 ]] || {
-            echo "ERROR: PAC tests require ./scripts/create-secrets.sh (CRED_SOURCE=local or vault)"
+            echo "ERROR: PAC tests require ./scripts/hack/create-secrets.sh (CRED_SOURCE=local or vault)"
             echo "  Missing: ${missing[*]}"
             exit 1
           }
@@ -517,6 +523,20 @@ spec:
         echo "Logging in to cluster $(params.CLUSTER_NAME) as $(params.RUN_AS)"
         login_cluster "$(params.RUN_AS)"
         cleanup_stale_s2i_namespaces "$(params.SPECS)"
+
+        # Clean stale upgrade test namespaces from prior runs
+        tags="$(params.TAGS)"
+        if [[ "$tags" == *pre-upgrade* || "$tags" == *post-upgrade* ]]; then
+          stale=$(oc get projects -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+            | grep -E '^releasetest-upgrade-' || true)
+          if [[ -n "$stale" ]]; then
+            echo "Cleaning stale releasetest-upgrade-* namespaces from prior runs"
+            while IFS= read -r ns; do
+              [[ -n "$ns" ]] || continue
+              oc delete project "$ns" --wait=false >/dev/null 2>&1 || true
+            done <<< "$stale"
+          fi
+        fi
 
         tags="$(params.TAGS)"
         case "$FRAMEWORK" in

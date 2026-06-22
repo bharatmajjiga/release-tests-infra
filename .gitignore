@@ -3,3 +3,4 @@
 
 # Per-cluster files (CA certs, kubeconfig fragments, etc.)
 config/cluster-configs/
+.cursor/

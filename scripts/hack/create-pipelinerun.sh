@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -114,7 +114,7 @@ Usage: $0
 
 Creates the PipelineRun and exits immediately.
 The pipeline finally task cleanup-pipelinerun removes the PipelineRun after optional slack notification.
-Workspace PVC cleanup: ./scripts/cleanup-pipeline-pvcs.sh --finished
+Workspace PVC cleanup: ./scripts/hack/cleanup-pipeline-pvcs.sh --finished
 EOF
       exit 0 ;;
     *) die "unknown arg: $1 (try --help)" ;;
@@ -206,13 +206,13 @@ preflight() {
     || die "GIT_RELEASE_TESTS_BRANCH required when TEST_FRAMEWORK=gauge"
 
   cluster_secret_exists "$NS" \
-    || die "secret $(cluster_secret_name) missing in $NS (run ./scripts/setup-pipelines-ci.sh)"
+    || die "secret $(cluster_secret_name) missing in $NS (run ./scripts/hack/setup-pipelines-ci.sh)"
   oc get pipeline acceptance-tests -n "$NS" &>/dev/null \
-    || die "pipeline acceptance-tests missing in $NS (run ./scripts/setup-pipelines-ci.sh)"
+    || die "pipeline acceptance-tests missing in $NS (run ./scripts/hack/setup-pipelines-ci.sh)"
 
   if is_enabled "${SEND_SLACK_NOTIFICATION}"; then
     oc get secret coreos-tektondev-webhook -n "$NS" &>/dev/null \
-      || die "slack webhook secret missing in $NS (run ./scripts/create-secrets.sh)"
+      || die "slack webhook secret missing in $NS (run ./scripts/hack/create-secrets.sh)"
     echo "    slack notification: enabled"
   else
     echo "    slack notification: disabled (SEND_SLACK_NOTIFICATION=${SEND_SLACK_NOTIFICATION})"
@@ -226,7 +226,23 @@ parse_test_suites
 resolve_channel
 
 TAGS="${TAGS:-$([ "$FW" = ginkgo ] && echo sanity || echo e2e)}"
-PREFIX="$([ "$FW" = ginkgo ] && echo acceptance-tests-ginkgo- || echo acceptance-tests-)"
+
+# Build descriptive PipelineRun name: acceptance-tests-aro-1222-prod-on-420-
+case "${INSTALLER,,}" in
+  cluster-platforms) _installer_tag="cp-" ;;
+  aws-ipi|aro|rosa) _installer_tag="${INSTALLER,,}-" ;;
+  *) _installer_tag="" ;;
+esac
+_osp_short=$(echo "${OPERATOR_VERSION}" | sed 's/\.//g')
+_env_short="${OPERATOR_ENVIRONMENT:-prod}"
+_ocp_short=""
+if command -v oc &>/dev/null; then
+  _ocp_short=$(oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null \
+    | sed 's/\([0-9]*\)\.\([0-9]*\).*/\1\2/' || true)
+fi
+[[ -z "$_ocp_short" ]] && _ocp_short="ocp"
+_fw_tag="$([ "$FW" = ginkgo ] && echo ginkgo- || echo "")"
+PREFIX="acceptance-tests-${_installer_tag}${_fw_tag}${_osp_short}-${_env_short}-on-${_ocp_short}-"
 
 echo "=== PipelineRun → ${NS}  framework=${FW}  cluster=${CLUSTER_NAME}  operator=${OPERATOR_VERSION}  channel=${CHANNEL} ==="
 echo "    install via pipeline: ${INSTALL_PIPELINES_OPERATOR:-true}"

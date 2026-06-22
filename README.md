@@ -8,10 +8,10 @@ Decentralized CI for OpenShift Pipelines acceptance tests on any cluster (amd64,
 .env (from env.template)
       │
       ▼
-run-workflow.sh
-  1. create-secrets.sh     — K8s secrets from .env or Vault
-  2. setup-pipelines-ci.sh — namespace, cluster secret, Tekton tasks + pipeline
-  3. create-pipelinerun.sh — PipelineRun from .env (no static YAML to maintain)
+scripts/run-workflow.sh
+  1. scripts/hack/create-secrets.sh     — K8s secrets from .env or Vault
+  2. scripts/hack/setup-pipelines-ci.sh — namespace, cluster secret, Tekton tasks + pipeline
+  3. scripts/hack/create-pipelinerun.sh — PipelineRun from .env (no static YAML to maintain)
 ```
 
 ## Quick Start
@@ -27,9 +27,9 @@ Or step by step:
 
 ```bash
 source .env
-./scripts/create-secrets.sh
-./scripts/setup-pipelines-ci.sh
-./scripts/create-pipelinerun.sh
+./scripts/hack/create-secrets.sh
+./scripts/hack/setup-pipelines-ci.sh
+./scripts/hack/create-pipelinerun.sh
 ```
 
 ## Configuration
@@ -38,18 +38,41 @@ All values live in `env.template` / `.env`. See `env.template` for the full list
 
 ## Running Tests
 
+### Acceptance tests (existing cluster)
+
 PipelineRuns are created dynamically by `create-pipelinerun.sh` (reads `.env`, per-run workspace PVC).
 
 ```bash
-./scripts/create-pipelinerun.sh
+./scripts/hack/create-pipelinerun.sh
 oc get pipelinerun -n pipelines-ci -w
 ```
 
-Cleanup workspace PVCs after runs:
+### Upgrade tests (AWS IPI — provisions + destroys cluster)
+
+Set `INSTALLER=aws-ipi` in `.env` with upgrade-specific vars, then:
 
 ```bash
-./scripts/cleanup-pipeline-pvcs.sh --finished
-./scripts/cleanup-pipeline-pvcs.sh --pipelinerun acceptance-tests-abc12
+./scripts/hack/run-upgrade-tests.sh
+```
+
+The pipeline provisions an AWS IPI cluster, installs the pre-upgrade operator version, runs pre-upgrade tests, upgrades the operator, runs all post-upgrade suites, then destroys the cluster in the finally block.
+
+Required `.env` vars: `PRE_UPGRADE_VERSION`, `UPGRADE_VERSION`, `AWS_ACCESS_KEY`, `AWS_ACCESS_SECRET`, `PULL_SECRET`, `SSH_PUBLIC_KEY`.
+
+### Cleanup
+
+Workspace PVCs:
+
+```bash
+./scripts/hack/cleanup-pipeline-pvcs.sh --finished
+./scripts/hack/cleanup-pipeline-pvcs.sh --pipelinerun acceptance-tests-abc12
+```
+
+Orphaned AWS clusters (from any machine with AWS creds):
+
+```bash
+./scripts/hack/cleanup-orphan-clusters.sh
+DRY_RUN=true MAX_AGE_HOURS=12 ./scripts/hack/cleanup-orphan-clusters.sh
 ```
 
 ## Repository Structure
@@ -58,19 +81,26 @@ Cleanup workspace PVCs after runs:
 release-tests-infra/
 ├── env.template / .env          # Configuration (not committed)
 ├── scripts/
-│   ├── run-workflow.sh          # Full workflow
-│   ├── setup-pipelines-ci.sh    # Namespace + cluster secret + Tekton apply
-│   ├── create-secrets.sh        # Secrets from .env or Vault
-│   ├── create-pipelinerun.sh    # Create PipelineRun from .env
-│   ├── cluster-login.sh         # Shared oc login helpers
-│   └── cleanup-pipeline-pvcs.sh # Remove per-run workspace PVCs
+│   ├── run-workflow.sh          # Entry point (orchestrates everything)
+│   └── hack/                    # Helper scripts
+│       ├── setup-pipelines-ci.sh      # Namespace + cluster secret + Tekton apply
+│       ├── create-secrets.sh          # Secrets from .env or Vault
+│       ├── create-pipelinerun.sh      # Create acceptance-tests PipelineRun
+│       ├── run-upgrade-tests.sh       # Create upgrade-tests PipelineRun (AWS IPI)
+│       ├── cluster-login.sh           # Shared oc login helpers
+│       ├── cleanup-pipeline-pvcs.sh   # Remove per-run workspace PVCs
+│       └── cleanup-orphan-clusters.sh # Destroy orphaned AWS IPI clusters
 ├── ci/
-│   ├── pipelines/acceptance-tests.yaml
-│   └── tasks/                   # Tekton tasks (release-tests, evaluate, …)
+│   ├── pipelines/
+│   │   ├── acceptance-tests.yaml  # Tests on existing cluster
+│   │   ├── upgrade-tests.yaml     # Provision + upgrade + test + destroy
+│   │   └── destroy-cluster.yaml   # Manual cluster destruction
+│   ├── tasks/                     # Tekton tasks (release-tests, provision, destroy, …)
+│   └── cronjobs/                  # Hourly orphan cluster cleanup
 ├── secrets/                     # Secret templates ($VAR placeholders)
 └── config/
     ├── auth/                    # Test users (used by setup-testing-accounts task)
-    ├── cluster-ca/              # Optional CA for CLUSTER_PLATFORMS=true
+    ├── cluster-configs/         # Optional CA for INSTALLER=cluster-platforms
     └── operators/               # install-pipelines.sh, uninstall-pipelines.sh
 ```
 
@@ -78,7 +108,7 @@ release-tests-infra/
 
 ```
 .env (CRED_SOURCE=local)  or  Vault (CRED_SOURCE=vault)
-  → create-secrets.sh
+  → scripts/hack/create-secrets.sh
   → pipelines-ci namespace
   → release-tests task (PAC, GitHub, GitLab, …)
 ```

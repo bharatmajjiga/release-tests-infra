@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# Create an upgrade-tests PipelineRun from .env
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+env_file_get() {
+  local key=$1 file=$2 line val
+  [[ -f "$file" ]] || return 1
+  line=$(grep -E "^[[:space:]]*${key}=" "$file" 2>/dev/null | tail -1) || return 1
+  val="${line#*=}"
+  val="${val#"${val%%[![:space:]]*}"}"
+  val="${val%"${val##*[![:space:]]}"}"
+  val="${val%\"}"; val="${val#\"}"
+  val="${val%\'}"; val="${val#\'}"
+  printf '%s' "$val"
+}
+
+normalize_bool() {
+  case "$(printf '%s' "${1:-false}" | tr '[:upper:]' '[:lower:]')" in
+    true|yes|1|on) printf '%s' true ;;
+    *) printf '%s' false ;;
+  esac
+}
+
+parse_test_suites() {
+  local raw="${TEST_SUITES:-}" s
+  # pre-upgrade and post-upgrade always run — not user-configurable
+  TEST_SUITE_ITEMS=(release-tests-pre-upgrade release-tests-post-upgrade)
+
+  raw="${raw// /,}"
+  IFS=',' read -ra parts <<< "$raw"
+  for s in "${parts[@]}"; do
+    s="${s// /}"
+    [[ -z "$s" ]] && continue
+    # skip if already in the list
+    [[ " ${TEST_SUITE_ITEMS[*]} " == *" $s "* ]] && continue
+    TEST_SUITE_ITEMS+=("$s")
+  done
+}
+
+resolve_channel() {
+  local ver=$1 ch=$2
+  if [[ -z "$ch" || "$ch" == latest ]]; then
+    printf 'pipelines-%s' "${ver%.*}"
+  else
+    printf '%s' "$ch"
+  fi
+}
+
+[[ -f "$ENV_FILE" ]] || die "missing $ENV_FILE (cp env.template .env)"
+set -a; source "$ENV_FILE"; set +a
+
+# shellcheck source=cluster-login.sh
+source "$SCRIPT_DIR/cluster-login.sh"
+
+command -v oc >/dev/null || die "oc CLI required"
+NS="${NAMESPACE:-pipelines-ci}"
+INSTALLER="${INSTALLER:-aws-ipi}"
+
+# --- Validate required vars ---
+missing=()
+for v in PRE_UPGRADE_VERSION UPGRADE_VERSION INSTALLER TEST_FRAMEWORK; do
+  [[ -n "${!v:-}" ]] || missing+=("$v")
+done
+
+if [[ "${INSTALLER,,}" == "aws-ipi" ]]; then
+  for v in OPENSHIFT_VERSION; do
+    [[ -n "${!v:-}" ]] || missing+=("$v")
+  done
+  # Check secrets on cluster
+  oc get secret aws-creds -n "$NS" &>/dev/null \
+    || missing+=("aws-creds secret (run ./scripts/hack/create-secrets.sh with INSTALLER=aws-ipi)")
+  oc get secret aws-install-config -n "$NS" &>/dev/null \
+    || missing+=("aws-install-config secret (run ./scripts/hack/create-secrets.sh with INSTALLER=aws-ipi)")
+fi
+
+FW="$(printf '%s' "${TEST_FRAMEWORK:-gauge}" | tr '[:upper:]' '[:lower:]')"
+case "$FW" in
+  gauge)
+    [[ -n "${GIT_RELEASE_TESTS_BRANCH:-}" ]] || missing+=("GIT_RELEASE_TESTS_BRANCH (required for gauge)") ;;
+  ginkgo)
+    [[ -n "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]] || missing+=("GIT_RELEASE_TESTS_GINKGO_BRANCH (required for ginkgo)") ;;
+  *) missing+=("TEST_FRAMEWORK must be gauge or ginkgo (got: $FW)") ;;
+esac
+
+oc get pipeline upgrade-tests -n "$NS" &>/dev/null \
+  || missing+=("upgrade-tests pipeline (run ./scripts/hack/setup-pipelines-ci.sh)")
+
+if ((${#missing[@]})); then
+  echo "ERROR: Missing required configuration:" >&2
+  printf '  - %s\n' "${missing[@]}" >&2
+  exit 1
+fi
+FW="$(printf '%s' "${TEST_FRAMEWORK:-gauge}" | tr '[:upper:]' '[:lower:]')"
+SEND_SLACK_NOTIFICATION=$(normalize_bool "$(env_file_get SEND_SLACK_NOTIFICATION "$ENV_FILE")")
+INSTALL_PIPELINES_OPERATOR=$(normalize_bool "${INSTALL_PIPELINES_OPERATOR:-true}")
+
+PRE_UPGRADE_CHANNEL="$(resolve_channel "$PRE_UPGRADE_VERSION" "${PRE_UPGRADE_CHANNEL:-}")"
+UPGRADE_CHANNEL="$(resolve_channel "$UPGRADE_VERSION" "${UPGRADE_CHANNEL:-}")"
+
+parse_test_suites
+
+TAGS="${TAGS:-$([ "$FW" = ginkgo ] && echo sanity || echo e2e)}"
+
+# Build descriptive PipelineRun name: upgrade-tests-aro-1212-to-1222-on-419-
+case "${INSTALLER,,}" in
+  cluster-platforms) _installer_tag="cp-" ;;
+  aws-ipi|aro|rosa) _installer_tag="${INSTALLER,,}-" ;;
+  *) _installer_tag="" ;;
+esac
+_pre_short=$(echo "${PRE_UPGRADE_VERSION}" | sed 's/\.//g')
+_upg_short=$(echo "${UPGRADE_VERSION}" | sed 's/\.//g')
+_ocp_short=$(echo "${OPENSHIFT_VERSION:-ocp}" | sed 's/[^0-9]//g; s/\([0-9]\{2,3\}\).*/\1/')
+[[ -z "$_ocp_short" ]] && _ocp_short="ocp"
+PREFIX="upgrade-tests-${_installer_tag}${_pre_short}-to-${_upg_short}-on-${_ocp_short}-"
+
+echo "=== Upgrade PipelineRun → ${NS} ==="
+echo "    installer: ${INSTALLER}"
+echo "    framework: ${FW}"
+echo "    pre-upgrade: ${PRE_UPGRADE_VERSION} (${PRE_UPGRADE_OPERATOR_ENVIRONMENT:-prod}/${PRE_UPGRADE_CATALOG_SOURCE:-redhat-operators})"
+echo "    upgrade:     ${UPGRADE_VERSION} (${UPGRADE_OPERATOR_ENVIRONMENT:-pre-stage}/${UPGRADE_CATALOG_SOURCE:-custom-operators})"
+echo "    suites: ${TEST_SUITE_ITEMS[*]}"
+
+write_pipelinerun() {
+  local pr pr_name
+  pr="$(mktemp "${TMPDIR:-/tmp}/pipelinerun.XXXXXX")"
+  trap 'rm -f "$pr"' RETURN
+
+  cat > "$pr" <<EOF
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: ${PREFIX}
+spec:
+  pipelineRef:
+    name: upgrade-tests
+  params:
+    - name: INSTALLER
+      value: "${INSTALLER}"
+    - name: BASE_DOMAIN
+      value: "${BASE_DOMAIN:-aws.ospqa.com}"
+    - name: AWS_REGION
+      value: "${AWS_REGION:-us-east-2}"
+    - name: OPENSHIFT_VERSION
+      value: "${OPENSHIFT_VERSION:-stable}"
+    - name: KEEP_CLUSTER
+      value: "${KEEP_CLUSTER:-false}"
+    - name: CLUSTER_LIFETIME
+      value: "${CLUSTER_LIFETIME:-6h}"
+    - name: CLUSTER_NAME
+      value: "${CLUSTER_NAME:-upgrd}"
+    - name: ARCH
+      value: "${ARCH:-linux/amd64}"
+    - name: GIT_INFRA_BRANCH
+      value: "${GIT_INFRA_BRANCH:-main}"
+    - name: GIT_RELEASE_TESTS_BRANCH
+      value: "${GIT_RELEASE_TESTS_BRANCH:-}"
+    - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+      value: "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}"
+    - name: TEST_FRAMEWORK
+      value: "${FW}"
+    - name: IMAGE
+      value: "${IMAGE:-registry.access.redhat.com/ubi9/go-toolset:latest}"
+    - name: TKN_DOWNLOAD_URL
+      value: "${TKN_DOWNLOAD_URL:-}"
+    - name: TAGS
+      value: "${TAGS}"
+    - name: PRE_UPGRADE_VERSION
+      value: "${PRE_UPGRADE_VERSION}"
+    - name: PRE_UPGRADE_OPERATOR_ENVIRONMENT
+      value: "${PRE_UPGRADE_OPERATOR_ENVIRONMENT:-prod}"
+    - name: PRE_UPGRADE_CATALOG_SOURCE
+      value: "${PRE_UPGRADE_CATALOG_SOURCE:-redhat-operators}"
+    - name: PRE_UPGRADE_KONFLUX_INDEX_IMAGE
+      value: "${PRE_UPGRADE_KONFLUX_INDEX_IMAGE:-}"
+    - name: PRE_UPGRADE_CHANNEL
+      value: "${PRE_UPGRADE_CHANNEL}"
+    - name: UPGRADE_VERSION
+      value: "${UPGRADE_VERSION}"
+    - name: UPGRADE_OPERATOR_ENVIRONMENT
+      value: "${UPGRADE_OPERATOR_ENVIRONMENT:-pre-stage}"
+    - name: UPGRADE_CATALOG_SOURCE
+      value: "${UPGRADE_CATALOG_SOURCE:-custom-operators}"
+    - name: UPGRADE_KONFLUX_INDEX_IMAGE
+      value: "${UPGRADE_KONFLUX_INDEX_IMAGE:-}"
+    - name: UPGRADE_CHANNEL
+      value: "${UPGRADE_CHANNEL}"
+    - name: INSTALL_PIPELINES_OPERATOR
+      value: "${INSTALL_PIPELINES_OPERATOR}"
+    - name: UNINSTALL_PIPELINES_OPERATOR
+      value: "${UNINSTALL_PIPELINES_OPERATOR:-false}"
+    - name: SEND_SLACK_NOTIFICATION
+      value: "${SEND_SLACK_NOTIFICATION}"
+    - name: TEST_SUITES
+      value:
+EOF
+
+  for s in "${TEST_SUITE_ITEMS[@]}"; do
+    printf '        - %s\n' "$s" >> "$pr"
+  done
+
+  cat >> "$pr" <<EOF
+  timeouts:
+    pipeline: 3h
+  workspaces:
+    - name: data
+      volumeClaimTemplate:
+        metadata:
+          labels:
+            app: release-tests-infra
+            release-tests-infra/pvc-role: upgrade-tests-workspace
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: ${PIPELINE_WORKSPACE_SIZE:-5Gi}
+EOF
+
+  pr_name=$(oc create -f "$pr" -n "$NS" -o jsonpath='{.metadata.name}') &&
+  echo "PipelineRun: pipelinerun.tekton.dev/${pr_name}"
+}
+
+write_pipelinerun

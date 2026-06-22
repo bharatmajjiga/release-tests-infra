@@ -58,6 +58,13 @@ spec:
 
           config/auth/01-test-auth.sh
 
+          # Re-login as admin after auth setup (script may have logged in as test user)
+          if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+            oc login --token=$ADMIN_TOKEN $APISERVER --insecure-skip-tls-verify=true
+          else
+            oc login -u $ADMIN_NAME -p $ADMIN_PASSWORD $APISERVER --insecure-skip-tls-verify=true
+          fi
+
           echo -e "\nLogin into cluster using credentials from secret cluster-$(params.CLUSTER_NAME) (kubeadmin-password / admin-token)."
           echo "Access the OpenShift web-console here: $(oc whoami --show-console)"
 

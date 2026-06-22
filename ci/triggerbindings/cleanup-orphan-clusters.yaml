@@ -1,0 +1,10 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: cleanup-orphan-clusters
+spec:
+  params:
+    - name: max_age_hours
+      value: $(body.max_age_hours)
+    - name: dry_run
+      value: $(body.dry_run)

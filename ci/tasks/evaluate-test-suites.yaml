@@ -134,16 +134,16 @@ spec:
         echo ""
         echo "=== Test suite evaluation (pipelinerun/${pr_name}) ==="
         if ((${#passed[@]})); then
-          echo "Passed (${#passed[@]})"
-          printf '  %s\n' "${passed[@]}"
+          echo "Passed (${#passed[@]}):"
+          for s in "${passed[@]}"; do echo "  $s"; done
         fi
         if ((${#failed[@]})); then
-          echo "Failed (${#failed[@]})"
-          printf '  %s\n' "${failed[@]}"
+          echo "Failed (${#failed[@]}):"
+          for s in "${failed[@]}"; do echo "  $s"; done
         fi
         if ((${#missing[@]})); then
-          echo "Missing (${#missing[@]})"
-          printf '  %s\n' "${missing[@]}"
+          echo "Missing (${#missing[@]}):"
+          for s in "${missing[@]}"; do echo "  $s"; done
         fi
 
         if ((${#failed[@]})); then

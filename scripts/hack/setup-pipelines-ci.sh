@@ -2,14 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 NAMESPACE="${NAMESPACE:-pipelines-ci}"
 FORCE=false MODE=full
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --pvc-only)
-      echo "NOTE: shared toolchain PVC removed; use ./scripts/cleanup-pipeline-pvcs.sh --legacy-only"
+      echo "NOTE: shared toolchain PVC removed; use ./scripts/hack/cleanup-pipeline-pvcs.sh --legacy-only"
       exec "$SCRIPT_DIR/cleanup-pipeline-pvcs.sh" --legacy-only --namespace "$NAMESPACE"
       ;;
     --cluster-secret-only) MODE=cluster; shift ;;
@@ -21,10 +21,10 @@ Usage: $0 [--cluster-secret-only] [--force]
   default:               cluster secret + Tekton tasks/pipeline
   --cluster-secret-only: cluster-\${CLUSTER_NAME} secret only (from .env)
   --force:               recreate cluster secret if it exists
-  --pvc-only:            (deprecated) run ./scripts/cleanup-pipeline-pvcs.sh --legacy-only
+  --pvc-only:            (deprecated) run ./scripts/hack/cleanup-pipeline-pvcs.sh --legacy-only
 
-  CLUSTER_PLATFORMS=true  → cluster-platforms, cluster-ca-cert, OC_TOKEN in secret
-  CLUSTER_PLATFORMS=false → skips update if secret already has cluster-platforms=true
+  INSTALLER=cluster-platforms → cluster-ca-cert, OC_TOKEN in secret
+  INSTALLER=none            → skips update if secret already has installer=cluster-platforms
 
   INSTALL_PIPELINES_OPERATOR=true runs operator install before Tekton apply (default from .env)
 EOF
@@ -51,14 +51,14 @@ ensure_namespace() {
 create_cluster_secret() {
   [[ -n "${CLUSTER_NAME:-}" ]] || die "CLUSTER_NAME required in .env"
   [[ -n "${APISERVER:-}" ]] || die "APISERVER required in .env"
-  local secret existing args platforms
+  local secret existing args installer
   secret="$(cluster_secret_name)" || die "CLUSTER_NAME required in .env"
 
   echo "Checking for secret ${secret} in ${NAMESPACE}..."
   if cluster_secret_exists "$NAMESPACE"; then
-    existing="$(secret_cluster_platforms "$secret" "$NAMESPACE")"
-    if ! cluster_platforms && [[ "$(printf '%s' "$existing" | tr '[:upper:]' '[:lower:]')" == true ]]; then
-      echo "Secret ${secret} has cluster-platforms=true; .env CLUSTER_PLATFORMS=false — skipping"
+    existing="$(secret_installer "$secret" "$NAMESPACE")"
+    if ! cluster_platforms && [[ "$existing" == cluster-platforms ]]; then
+      echo "Secret ${secret} has installer=cluster-platforms; .env INSTALLER=${INSTALLER:-none} — skipping"
       return 0
     fi
     [[ "$FORCE" == true ]] || { echo "Secret ${secret} already exists in ${NAMESPACE} (use --force to recreate)"; return 0; }
@@ -70,8 +70,8 @@ create_cluster_secret() {
   echo "=== Verifying cluster login ==="
   cluster_login || die "cluster login failed"
 
-  platforms=$(cluster_platforms_flag)
-  echo "=== Creating secret ${secret} (cluster-platforms=${platforms}) ==="
+  installer=$(cluster_installer)
+  echo "=== Creating secret ${secret} (installer=${installer}) ==="
 
   args=(
     --from-literal=admin-name="$(cluster_admin_name)"
@@ -80,8 +80,7 @@ create_cluster_secret() {
     --from-literal=kubeadmin-password="${KUBEADMIN_PASSWORD:-}"
     --from-literal=user-password="${USER_PASSWORD:-user}"
     --from-literal=insecure-skip-tls-verify="$(cluster_insecure_tls)"
-    --from-literal=cluster-platforms="${platforms}"
-    --from-literal=installer=none
+    --from-literal=installer="${installer}"
     --from-literal=mirror-reg=quay.io
   )
   cluster_platforms && args+=(--from-file=cluster-ca-cert="$(cluster_ca_path)")
@@ -214,6 +213,19 @@ oc apply -f "$REPO_ROOT/ci/tasks/" -n "$NAMESPACE"
 oc apply -f "$REPO_ROOT/ci/pipelines/" -n "$NAMESPACE"
 oc get tasks,pipelines -n "$NAMESPACE" -o custom-columns=KIND:.kind,NAME:.metadata.name --no-headers | sed 's/^/  /'
 
+if oc get secret aws-creds -n "$NAMESPACE" &>/dev/null; then
+  echo "=== Applying orphan cleanup triggers (hourly) ==="
+  oc apply -f "$REPO_ROOT/ci/triggertemplates/" -n "$NAMESPACE"
+  oc apply -f "$REPO_ROOT/ci/triggerbindings/" -n "$NAMESPACE"
+  oc apply -f "$REPO_ROOT/ci/eventlisteners/" -n "$NAMESPACE"
+  oc apply -f "$REPO_ROOT/ci/routes/" -n "$NAMESPACE"
+  oc apply -f "$REPO_ROOT/ci/cronjobs/" -n "$NAMESPACE"
+  echo "  EventListener: el-cleanup-orphan-clusters"
+  echo "  CronJob: cleanup-orphan-clusters (hourly POST to EventListener)"
+fi
+
 echo "=== Setup complete ==="
 echo "Run acceptance tests:"
-echo "  ./scripts/create-pipelinerun.sh"
+echo "  ./scripts/hack/create-pipelinerun.sh"
+echo "Run upgrade tests (INSTALLER=aws-ipi):"
+echo "  ./scripts/hack/run-upgrade-tests.sh"

@@ -2,13 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HACK_DIR="$SCRIPT_DIR/hack"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 [[ -f "$REPO_ROOT/.env" ]] || { echo "ERROR: .env not found (cp env.template .env)" >&2; exit 1; }
 set -a; source "$REPO_ROOT/.env"; set +a
 
-# shellcheck source=cluster-login.sh
-source "$SCRIPT_DIR/cluster-login.sh"
+# shellcheck source=hack/cluster-login.sh
+source "$HACK_DIR/cluster-login.sh"
 validate_cluster_env || exit 1
 
 echo "============================================================"
@@ -21,7 +22,7 @@ echo "============================================================"
 cluster_login
 
 echo "=== Step 1: Create secrets ==="
-"$SCRIPT_DIR/create-secrets.sh"
+"$HACK_DIR/create-secrets.sh"
 
 is_enabled() {
   case "$(printf '%s' "${1:-false}" | tr '[:upper:]' '[:lower:]')" in
@@ -39,9 +40,9 @@ if is_enabled "${INSTALL_SERVERLESS_OPERATOR:-false}"; then
 fi
 
 echo "=== Setting up Tekton pipelines-ci ==="
-"$SCRIPT_DIR/setup-pipelines-ci.sh"
+"$HACK_DIR/setup-pipelines-ci.sh"
 
 echo "=== Creating PipelineRun ==="
-"$SCRIPT_DIR/create-pipelinerun.sh"
+"$HACK_DIR/create-pipelinerun.sh"
 
 echo "=== Workflow complete ==="

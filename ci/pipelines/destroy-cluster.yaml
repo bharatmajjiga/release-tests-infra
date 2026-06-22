@@ -1,0 +1,23 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: destroy-cluster
+spec:
+  params:
+    - name: CLUSTER_NAME
+      type: string
+      description: Cluster name (must match secret suffix, e.g. upgrd0617b3d)
+    - name: ARCH
+      default: linux/amd64
+  tasks:
+    - name: destroy-cluster
+      params:
+        - name: CLUSTER_NAME
+          value: $(params.CLUSTER_NAME)
+        - name: KEEP_CLUSTER
+          value: "false"
+        - name: ARCH
+          value: $(params.ARCH)
+      taskRef:
+        name: destroy-cluster
+      timeout: 30m

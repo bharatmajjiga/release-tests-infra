@@ -1,0 +1,246 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: destroy-cluster
+spec:
+  params:
+    - name: CLUSTER_NAME
+      type: string
+      default: ""
+      description: Specific cluster to destroy (skipped if KEEP_CLUSTER=true)
+    - name: KEEP_CLUSTER
+      default: "false"
+    - name: MAX_AGE_HOURS
+      default: "6"
+      description: Also destroy any provisioned cluster secrets older than this
+    - name: DRY_RUN
+      default: "false"
+    - name: ARCH
+      default: linux/amd64
+  steps:
+    # Step 1: Handle aws-ipi clusters
+    - name: destroy-aws
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      workingDir: /mnt
+      env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: aws-creds
+              key: aws-access-key-id
+              optional: true
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-creds
+              key: aws-secret-access-key
+              optional: true
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        ARCH_SHORT="$(echo '$(params.ARCH)' | cut -d/ -f2)"
+        [[ -z "$ARCH_SHORT" ]] && ARCH_SHORT=amd64
+        MIRROR="https://mirror.openshift.com/pub/openshift-v4/${ARCH_SHORT}/clients/ocp"
+        DRY_RUN="$(params.DRY_RUN)"
+        MAX_AGE="$(params.MAX_AGE_HOURS)"
+        now_epoch=$(date -u +%s)
+        destroyed=0
+
+        destroy_aws_cluster() {
+          local name=$1
+          if ! oc get secret "cluster-${name}" &>/dev/null; then
+            echo "  secret cluster-${name} not found — skip"
+            return 0
+          fi
+          local installer
+          installer=$(oc get secret "cluster-${name}" \
+            -o go-template='{{index .data "installer" | base64decode}}' 2>/dev/null || true)
+          if [[ "${installer,,}" != "aws-ipi" ]]; then
+            return 0
+          fi
+          if [[ "${DRY_RUN,,}" == "true" ]]; then
+            echo "  DRY_RUN: would destroy aws-ipi ${name}"
+            return 0
+          fi
+
+          mkdir -p "d-${name}/auth"
+          oc get secret "cluster-${name}" \
+            -o go-template='{{index .data "metadata.json" | base64decode}}' > "d-${name}/metadata.json" 2>/dev/null || true
+          oc get secret "cluster-${name}" \
+            -o go-template='{{index .data "kubeconfig" | base64decode}}' > "d-${name}/auth/kubeconfig" 2>/dev/null || true
+          export AWS_DEFAULT_REGION=$(oc get secret "cluster-${name}" \
+            -o go-template='{{index .data "aws-region" | base64decode}}' 2>/dev/null || echo us-east-2)
+
+          if [[ ! -s "d-${name}/metadata.json" ]]; then
+            echo "  no metadata.json — deleting stale secret"
+            oc delete secret "cluster-${name}" --ignore-not-found
+            return 0
+          fi
+
+          if ! command -v openshift-install &>/dev/null; then
+            local v=""
+            [[ -s "d-${name}/auth/kubeconfig" ]] && \
+              v=$(oc get clusterversion version --kubeconfig="d-${name}/auth/kubeconfig" \
+                -o jsonpath='{.status.desired.version}' 2>/dev/null || true)
+            [[ -z "$v" ]] && v=stable
+            curl -sL "${MIRROR}/${v}/openshift-install-linux.tar.gz" \
+              | tar xz -C /usr/local/bin openshift-install 2>/dev/null \
+              || curl -sL "${MIRROR}/stable/openshift-install-linux.tar.gz" \
+                 | tar xz -C /usr/local/bin openshift-install
+          fi
+
+          echo "  destroying aws-ipi (region=${AWS_DEFAULT_REGION})..."
+          local ret=0
+          openshift-install destroy cluster --dir="d-${name}" --log-level=info 2>&1 || ret=$?
+          if [[ $ret -ne 0 ]]; then
+            echo "  retry..."
+            ret=0
+            openshift-install destroy cluster --dir="d-${name}" --log-level=info 2>&1 || ret=$?
+          fi
+          if [[ $ret -eq 0 ]]; then
+            oc delete secret "cluster-${name}" --ignore-not-found
+            echo "  done"
+            destroyed=$((destroyed + 1))
+          else
+            echo "  ERROR: destroy failed — secret kept"
+          fi
+        }
+
+        CLUSTER_NAME="$(params.CLUSTER_NAME)"
+        if [[ -n "$CLUSTER_NAME" && "$(params.KEEP_CLUSTER)" != "true" ]]; then
+          installer=$(oc get secret "cluster-${CLUSTER_NAME}" \
+            -o go-template='{{index .data "installer" | base64decode}}' 2>/dev/null || true)
+          if [[ "${installer,,}" == "aws-ipi" ]]; then
+            echo "=== Destroying aws-ipi ${CLUSTER_NAME} ==="
+            destroy_aws_cluster "$CLUSTER_NAME"
+          fi
+        fi
+
+        echo ""
+        echo "=== Scanning for aws-ipi orphans older than ${MAX_AGE}h ==="
+        for secret in $(oc get secret -o name 2>/dev/null | grep '^secret/cluster-' | sed 's|secret/||'); do
+          installer=$(oc get secret "$secret" \
+            -o go-template='{{index .data "installer" | base64decode}}' 2>/dev/null || true)
+          [[ "$installer" == "aws-ipi" ]] || continue
+          name="${secret#cluster-}"
+          [[ "$name" == "$CLUSTER_NAME" ]] && continue
+          created_at=$(oc get secret "$secret" \
+            -o go-template='{{index .data "created-at" | base64decode}}' 2>/dev/null || true)
+          [[ -n "$created_at" ]] || continue
+          age_hours=$(( (now_epoch - $(date -u -d "$created_at" +%s 2>/dev/null || echo "$now_epoch")) / 3600 ))
+          if (( age_hours >= MAX_AGE )); then
+            echo "  ORPHAN: ${name} (${age_hours}h old)"
+            destroy_aws_cluster "$name"
+          else
+            echo "  OK: ${name} (${age_hours}h old)"
+          fi
+        done
+        echo "=== AWS complete: ${destroyed} destroyed ==="
+      volumeMounts:
+        - name: work
+          mountPath: /mnt
+
+    # Step 2: Handle ARO clusters
+    - name: destroy-aro
+      image: mcr.microsoft.com/azure-cli:latest
+      workingDir: /mnt
+      env:
+        - name: AZURE_TENANT
+          valueFrom:
+            secretKeyRef:
+              name: azure-creds
+              key: azure-tenant
+              optional: true
+        - name: AZURE_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: azure-creds
+              key: azure-username
+              optional: true
+        - name: AZURE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: azure-creds
+              key: azure-password
+              optional: true
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        DRY_RUN="$(params.DRY_RUN)"
+        MAX_AGE="$(params.MAX_AGE_HOURS)"
+        now_epoch=$(date -u +%s)
+        destroyed=0
+
+        [[ -n "${AZURE_TENANT:-}" ]] || { echo "No azure-creds — skipping ARO cleanup"; exit 0; }
+
+        destroy_aro_cluster() {
+          local name=$1
+          if ! oc get secret "cluster-${name}" &>/dev/null 2>&1; then
+            echo "  secret cluster-${name} not found — skip"
+            return 0
+          fi
+          local installer
+          installer=$(oc get secret "cluster-${name}" \
+            -o go-template='{{index .data "installer" | base64decode}}' 2>/dev/null || true)
+          if [[ "${installer,,}" != "aro" ]]; then
+            return 0
+          fi
+          if [[ "${DRY_RUN,,}" == "true" ]]; then
+            echo "  DRY_RUN: would destroy aro ${name}"
+            return 0
+          fi
+
+          local rg
+          rg=$(oc get secret "cluster-${name}" \
+            -o go-template='{{index .data "resource-group" | base64decode}}' 2>/dev/null || echo "${name}-rg")
+
+          echo "  destroying aro (resource-group=${rg})..."
+          az login --service-principal -u "$AZURE_USERNAME" -p "$AZURE_PASSWORD" --tenant "$AZURE_TENANT" 2>&1 | head -1
+          az group delete -y --name "$rg" 2>&1 || {
+            echo "  WARNING: az group delete failed"
+            return 1
+          }
+          oc delete secret "cluster-${name}" --ignore-not-found 2>/dev/null || true
+          echo "  done"
+          destroyed=$((destroyed + 1))
+        }
+
+        CLUSTER_NAME="$(params.CLUSTER_NAME)"
+        if [[ -n "$CLUSTER_NAME" && "$(params.KEEP_CLUSTER)" != "true" ]]; then
+          installer=$(oc get secret "cluster-${CLUSTER_NAME}" \
+            -o go-template='{{index .data "installer" | base64decode}}' 2>/dev/null || true)
+          if [[ "${installer,,}" == "aro" ]]; then
+            echo "=== Destroying aro ${CLUSTER_NAME} ==="
+            destroy_aro_cluster "$CLUSTER_NAME"
+          fi
+        fi
+
+        echo ""
+        echo "=== Scanning for aro orphans older than ${MAX_AGE}h ==="
+        for secret in $(oc get secret -o name 2>/dev/null | grep '^secret/cluster-' | sed 's|secret/||'); do
+          installer=$(oc get secret "$secret" \
+            -o go-template='{{index .data "installer" | base64decode}}' 2>/dev/null || true)
+          [[ "$installer" == "aro" ]] || continue
+          name="${secret#cluster-}"
+          [[ "$name" == "$CLUSTER_NAME" ]] && continue
+          created_at=$(oc get secret "$secret" \
+            -o go-template='{{index .data "created-at" | base64decode}}' 2>/dev/null || true)
+          [[ -n "$created_at" ]] || continue
+          age_hours=$(( (now_epoch - $(date -u -d "$created_at" +%s 2>/dev/null || echo "$now_epoch")) / 3600 ))
+          if (( age_hours >= MAX_AGE )); then
+            echo "  ORPHAN: ${name} (${age_hours}h old)"
+            destroy_aro_cluster "$name"
+          else
+            echo "  OK: ${name} (${age_hours}h old)"
+          fi
+        done
+        echo "=== ARO complete: ${destroyed} destroyed ==="
+      volumeMounts:
+        - name: work
+          mountPath: /mnt
+
+  volumes:
+    - name: work
+      emptyDir: {}

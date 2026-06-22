@@ -1,0 +1,395 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: provision-cluster
+spec:
+  params:
+    - name: CLUSTER_NAME
+      description: Cluster name prefix (suffix auto-generated)
+      default: upgrd
+    - name: INSTALLER
+      description: "Provisioning method: aws-ipi, aro, cluster-platforms, none"
+      default: aws-ipi
+    - name: BASE_DOMAIN
+      default: aws.ospqa.com
+    - name: AWS_REGION
+      default: us-east-2
+    - name: AZURE_LOCATION
+      default: eastus
+    - name: OPENSHIFT_VERSION
+      description: "OCP version (e.g. stable-4.19, 4.15 for ARO)"
+      default: stable
+    - name: ARCH
+      default: linux/amd64
+    - name: WORKER_REPLICAS
+      default: "3"
+    - name: WORKER_TYPE
+      default: m5.xlarge
+    - name: MASTER_TYPE
+      default: m5.xlarge
+    - name: CLUSTER_LIFETIME
+      description: Tag for orphan cleanup (e.g. 6h)
+      default: "6h"
+  results:
+    - name: cluster-name
+    - name: api-url
+    - name: installer
+  steps:
+    # ============================================================
+    # Step 1: AWS IPI provisioning
+    # ============================================================
+    - name: aws-ipi
+      onError: continue
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      workingDir: /mnt
+      env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: aws-creds
+              key: aws-access-key-id
+              optional: true
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-creds
+              key: aws-secret-access-key
+              optional: true
+        - name: PULL_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: aws-install-config
+              key: pull-secret
+              optional: true
+        - name: SSH_PUBLIC_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-install-config
+              key: ssh-public-key
+              optional: true
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        INSTALLER="$(params.INSTALLER)"
+        if [[ "${INSTALLER,,}" != "aws-ipi" ]]; then
+          echo "INSTALLER=${INSTALLER} — not aws-ipi, skipping"
+          exit 0
+        fi
+
+        CLUSTER_PREFIX="$(params.CLUSTER_NAME)"
+
+        if oc get secret "cluster-${CLUSTER_PREFIX}" &>/dev/null; then
+          REUSE_API=$(oc get secret "cluster-${CLUSTER_PREFIX}" -o go-template='{{index .data "api-url" | base64decode}}' 2>/dev/null || true)
+          echo "Secret cluster-${CLUSTER_PREFIX} found (API: ${REUSE_API})"
+          if curl -sk --connect-timeout 10 "${REUSE_API}/healthz" &>/dev/null; then
+            echo "  Cluster alive — reusing"
+            echo -n "${CLUSTER_PREFIX}" > "$(results.cluster-name.path)"
+            echo -n "aws-ipi" > "$(results.installer.path)"
+            echo -n "${REUSE_API}" > "$(results.api-url.path)"
+            exit 0
+          else
+            echo "  API unreachable — deleting stale secret"
+            oc delete secret "cluster-${CLUSTER_PREFIX}" --ignore-not-found
+          fi
+        fi
+
+        CLUSTER_SUFFIX="$(printf '%(%m%d)T')$(echo '$(context.taskRun.uid)' | cut -c1-3)"
+        CLUSTER_NAME="${CLUSTER_PREFIX}${CLUSTER_SUFFIX}"
+        CREATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        ARCH_SHORT="$(echo '$(params.ARCH)' | cut -d/ -f2)"
+        [[ -z "$ARCH_SHORT" ]] && ARCH_SHORT=amd64
+
+        echo "=== Downloading openshift-install ==="
+        MIRROR="https://mirror.openshift.com/pub/openshift-v4/${ARCH_SHORT}/clients/ocp"
+        VERSION="$(params.OPENSHIFT_VERSION)"
+        DL_URL="${MIRROR}/${VERSION}"
+        [[ "$VERSION" == *dev-preview* ]] && DL_URL="${MIRROR}-${VERSION}"
+        curl -sL "${DL_URL}/openshift-install-linux.tar.gz" | tar xz -C /usr/local/bin openshift-install
+        openshift-install version
+
+        echo "=== Generating install-config.yaml ==="
+        mkdir -p install-dir
+        cat > install-dir/install-config.yaml <<EOCFG
+        apiVersion: v1
+        baseDomain: $(params.BASE_DOMAIN)
+        metadata:
+          name: ${CLUSTER_NAME}
+        compute:
+        - architecture: ${ARCH_SHORT}
+          hyperthreading: Enabled
+          name: worker
+          replicas: $(params.WORKER_REPLICAS)
+          platform:
+            aws:
+              type: $(params.WORKER_TYPE)
+        controlPlane:
+          architecture: ${ARCH_SHORT}
+          hyperthreading: Enabled
+          name: master
+          replicas: 3
+          platform:
+            aws:
+              type: $(params.MASTER_TYPE)
+        networking:
+          networkType: OVNKubernetes
+          clusterNetwork:
+          - cidr: 10.128.0.0/14
+            hostPrefix: 23
+          machineNetwork:
+          - cidr: 10.0.0.0/16
+          serviceNetwork:
+          - 172.30.0.0/16
+        platform:
+          aws:
+            region: $(params.AWS_REGION)
+            userTags:
+              pipelines-ci: "true"
+              installer: aws-ipi
+              cluster-name: "${CLUSTER_NAME}"
+              created-at: "${CREATED_AT}"
+              created-by: "${HOSTNAME%%.*}"
+              cluster-lifetime: "$(params.CLUSTER_LIFETIME)"
+        pullSecret: '${PULL_SECRET}'
+        sshKey: '${SSH_PUBLIC_KEY}'
+        EOCFG
+        sed -i 's/^        //' install-dir/install-config.yaml
+
+        echo "=== Creating cluster ${CLUSTER_NAME} on $(params.BASE_DOMAIN) ==="
+        openshift-install create cluster --dir=install-dir --log-level=info 2>&1 | tee install.log
+
+        API_URL="$(oc config view --kubeconfig=install-dir/auth/kubeconfig --minify -o jsonpath='{.clusters[0].cluster.server}')"
+
+        echo "=== Creating cluster secret ==="
+        oc create secret generic "cluster-${CLUSTER_NAME}" \
+          --from-literal=installer=aws-ipi \
+          --from-literal=api-url="${API_URL}" \
+          --from-literal=admin-name=kubeadmin \
+          --from-literal=kubeadmin-password="$(cat install-dir/auth/kubeadmin-password)" \
+          --from-literal=user-password=user --from-literal=admin-token="" \
+          --from-literal=insecure-skip-tls-verify=true --from-literal=mirror-reg=quay.io \
+          --from-literal=cluster-name="${CLUSTER_NAME}" \
+          --from-literal=base-domain="$(params.BASE_DOMAIN)" \
+          --from-literal=aws-region="$(params.AWS_REGION)" \
+          --from-literal=created-at="${CREATED_AT}" \
+          --from-file=kubeconfig=install-dir/auth/kubeconfig \
+          --from-file=metadata.json=install-dir/metadata.json
+        oc label secret "cluster-${CLUSTER_NAME}" pipelines-ci=true installer=aws-ipi --overwrite
+
+        echo -n "${CLUSTER_NAME}" > "$(results.cluster-name.path)"
+        echo -n "aws-ipi" > "$(results.installer.path)"
+        echo -n "${API_URL}" > "$(results.api-url.path)"
+        echo "=== AWS IPI cluster ${CLUSTER_NAME} provisioned ==="
+      volumeMounts:
+        - name: work
+          mountPath: /mnt
+
+    # ============================================================
+    # Step 2: ARO provisioning
+    # ============================================================
+    - name: aro
+      onError: continue
+      image: mcr.microsoft.com/azure-cli:latest
+      workingDir: /mnt
+      env:
+        - name: AZURE_TENANT
+          valueFrom:
+            secretKeyRef:
+              name: azure-creds
+              key: azure-tenant
+              optional: true
+        - name: AZURE_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: azure-creds
+              key: azure-username
+              optional: true
+        - name: AZURE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: azure-creds
+              key: azure-password
+              optional: true
+        - name: PULL_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: aws-install-config
+              key: pull-secret
+              optional: true
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        INSTALLER="$(params.INSTALLER)"
+        if [[ "${INSTALLER,,}" != "aro" ]]; then
+          echo "INSTALLER=${INSTALLER} — not aro, skipping"
+          exit 0
+        fi
+
+        CLUSTER_PREFIX="$(params.CLUSTER_NAME)"
+        LOCATION="$(params.AZURE_LOCATION)"
+
+        # Reuse existing cluster
+        if oc get secret "cluster-${CLUSTER_PREFIX}" &>/dev/null 2>&1; then
+          REUSE_API=$(oc get secret "cluster-${CLUSTER_PREFIX}" -o go-template='{{index .data "api-url" | base64decode}}' 2>/dev/null || true)
+          echo "Secret cluster-${CLUSTER_PREFIX} found (API: ${REUSE_API})"
+          if curl -sk --connect-timeout 10 "${REUSE_API}/healthz" &>/dev/null; then
+            echo "  Cluster alive — reusing"
+            echo -n "${CLUSTER_PREFIX}" > "$(results.cluster-name.path)"
+            echo -n "aro" > "$(results.installer.path)"
+            echo -n "${REUSE_API}" > "$(results.api-url.path)"
+            exit 0
+          else
+            echo "  API unreachable — deleting stale secret"
+            oc delete secret "cluster-${CLUSTER_PREFIX}" --ignore-not-found 2>/dev/null || true
+          fi
+        fi
+
+        CLUSTER_SUFFIX="$(date +%m%d)$(echo '$(context.taskRun.uid)' | cut -c1-3)"
+        CLUSTER_NAME="${CLUSTER_PREFIX}${CLUSTER_SUFFIX}"
+        CREATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+        echo -n "${CLUSTER_NAME}" > "$(results.cluster-name.path)"
+        echo -n "aro" > "$(results.installer.path)"
+
+        [[ -n "${AZURE_TENANT:-}" ]] || { echo "ERROR: AZURE_TENANT not set (azure-creds secret missing?)"; exit 1; }
+        [[ -n "${AZURE_USERNAME:-}" ]] || { echo "ERROR: AZURE_USERNAME not set"; exit 1; }
+        [[ -n "${AZURE_PASSWORD:-}" ]] || { echo "ERROR: AZURE_PASSWORD not set"; exit 1; }
+
+        echo "=== Logging in to Azure ==="
+        az login --service-principal -u "$AZURE_USERNAME" -p "$AZURE_PASSWORD" --tenant "$AZURE_TENANT"
+
+        echo "=== Checking supported OCP versions ==="
+        SUPPORTED_OCP_VERSIONS=$(az aro get-versions --location="$LOCATION" | jq -r '.[]')
+        echo "Supported: ${SUPPORTED_OCP_VERSIONS}"
+
+        OCP_VERSION="$(params.OPENSHIFT_VERSION)"
+        if [[ -z "$OCP_VERSION" || "$OCP_VERSION" == "stable" ]]; then
+          echo "ERROR: OPENSHIFT_VERSION must be a specific version for ARO (e.g. 4.15), not 'stable'"
+          exit 1
+        fi
+        DESIRED=$(echo "$SUPPORTED_OCP_VERSIONS" | { grep "^${OCP_VERSION}" || true; })
+        if [[ -z "$DESIRED" ]]; then
+          echo "ERROR: Version ${OCP_VERSION} not supported on ARO. Available: ${SUPPORTED_OCP_VERSIONS}"
+          exit 1
+        fi
+        echo "Using OCP version: ${DESIRED}"
+
+        echo "=== Creating resource group ${CLUSTER_NAME}-rg ==="
+        az group create --name "${CLUSTER_NAME}-rg" --location "$LOCATION"
+
+        echo "=== Creating virtual network ==="
+        az network vnet create --resource-group "${CLUSTER_NAME}-rg" --name aro-vnet --address-prefixes 10.0.0.0/22
+
+        echo "=== Creating master subnet ==="
+        az network vnet subnet create --resource-group "${CLUSTER_NAME}-rg" --vnet-name aro-vnet \
+          --name master-subnet --address-prefixes 10.0.0.0/23
+
+        echo "=== Creating worker subnet ==="
+        az network vnet subnet create --resource-group "${CLUSTER_NAME}-rg" --vnet-name aro-vnet \
+          --name worker-subnet --address-prefixes 10.0.2.0/23
+
+        echo "=== Creating ARO cluster (30-45 min) ==="
+        ARO_ARGS=(
+          --resource-group "${CLUSTER_NAME}-rg"
+          --name "${CLUSTER_NAME}"
+          --vnet aro-vnet
+          --master-subnet master-subnet
+          --worker-subnet worker-subnet
+          --version "$DESIRED"
+          --client-id "$AZURE_USERNAME"
+          --client-secret "$AZURE_PASSWORD"
+          --master-vm-size Standard_D8s_v3
+          --worker-vm-size Standard_D4s_v3
+          --worker-count 3
+          --fips
+        )
+        if [[ -n "${PULL_SECRET:-}" ]]; then
+          echo "$PULL_SECRET" > /tmp/pull-secret.json
+          ARO_ARGS+=(--pull-secret @/tmp/pull-secret.json)
+        fi
+        az aro create "${ARO_ARGS[@]}"
+
+        echo "=== Extracting credentials ==="
+        ADMIN_PASSWORD=$(az aro list-credentials --name "$CLUSTER_NAME" --resource-group "${CLUSTER_NAME}-rg" --query kubeadminPassword -o tsv)
+        API_URL=$(az aro show --name "$CLUSTER_NAME" --resource-group "${CLUSTER_NAME}-rg" --query "apiserverProfile.url" -o tsv)
+        CONSOLE_URL=$(az aro show --name "$CLUSTER_NAME" --resource-group "${CLUSTER_NAME}-rg" --query "consoleProfile.url" -o tsv)
+        echo -n "${API_URL}" > "$(results.api-url.path)"
+
+        echo "=== Getting kubeconfig ==="
+        mkdir -p auth
+        az aro get-admin-kubeconfig --name "$CLUSTER_NAME" --resource-group "${CLUSTER_NAME}-rg" --file auth/kubeconfig
+
+        echo "=== Creating cluster secret ==="
+        # oc may not be in azure-cli image; write secret YAML directly
+        cat > /tmp/cluster-secret.yaml <<EOSECRET
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: cluster-${CLUSTER_NAME}
+          labels:
+            pipelines-ci: "true"
+            installer: aro
+        type: Opaque
+        stringData:
+          installer: aro
+          api-url: "${API_URL}"
+          admin-name: kubeadmin
+          kubeadmin-password: "${ADMIN_PASSWORD}"
+          user-password: user
+          admin-token: ""
+          insecure-skip-tls-verify: "true"
+          mirror-reg: quay.io
+          cluster-name: "${CLUSTER_NAME}"
+          resource-group: "${CLUSTER_NAME}-rg"
+          azure-location: "${LOCATION}"
+          created-at: "${CREATED_AT}"
+        EOSECRET
+        sed -i 's/^        //' /tmp/cluster-secret.yaml
+
+        # Try oc first, fall back to kubectl or curl
+        if command -v oc &>/dev/null; then
+          oc apply -f /tmp/cluster-secret.yaml
+        elif command -v kubectl &>/dev/null; then
+          kubectl apply -f /tmp/cluster-secret.yaml
+        else
+          echo "WARNING: no oc/kubectl — secret must be created manually"
+          cat /tmp/cluster-secret.yaml
+        fi
+
+        echo "=== ARO cluster ${CLUSTER_NAME} provisioned ==="
+        echo "API: ${API_URL}"
+        echo "Console: ${CONSOLE_URL}"
+      volumeMounts:
+        - name: work
+          mountPath: /mnt
+
+    # ============================================================
+    # Step 3: Skip provisioning (cluster-platforms / none)
+    # ============================================================
+    - name: skip-provision
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      workingDir: /mnt
+      script: |
+        #!/usr/bin/env bash
+        INSTALLER="$(params.INSTALLER)"
+        INSTALLER="${INSTALLER,,}"
+
+        # If results already set by aws-ipi or aro step, exit
+        if [[ -s "$(results.cluster-name.path)" ]]; then
+          echo "Cluster already provisioned by previous step"
+          exit 0
+        fi
+
+        echo "INSTALLER=${INSTALLER} — using existing cluster"
+        echo -n "$(params.CLUSTER_NAME)" > "$(results.cluster-name.path)"
+        echo -n "${INSTALLER}" > "$(results.installer.path)"
+        oc get secret "cluster-$(params.CLUSTER_NAME)" -o jsonpath='{.data.api-url}' \
+          | base64 -d > "$(results.api-url.path)" 2>/dev/null || echo -n "" > "$(results.api-url.path)"
+      volumeMounts:
+        - name: work
+          mountPath: /mnt
+
+  volumes:
+    - name: work
+      emptyDir: {}

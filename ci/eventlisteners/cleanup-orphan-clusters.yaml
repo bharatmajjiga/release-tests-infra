@@ -1,0 +1,12 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: cleanup-orphan-clusters
+spec:
+  serviceAccountName: pipeline
+  triggers:
+    - name: cleanup
+      bindings:
+        - ref: cleanup-orphan-clusters
+      template:
+        ref: cleanup-orphan-clusters
