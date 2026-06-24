@@ -217,13 +217,25 @@ spec:
         }
 
         install_oc() {
-          local ver
-          ver=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
-            "${APISERVER}/apis/config.openshift.io/v1/clusterversions/version" \
-            | sed -n 's/.*"version":[[:space:]]*"\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/p' | head -1) || true
-          echo "Installing oc ${ver:-stable} (${CLI_ARCH})..."
-          curl -sSfL "https://mirror.openshift.com/pub/openshift-v4/${CLI_ARCH}/clients/ocp/${ver:-stable}/openshift-client-linux.tar.gz" \
-            | tar xz -C "$TOOLS_BIN" oc kubectl
+          local url="" is_tar=false
+          url=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+            "${APISERVER}/apis/console.openshift.io/v1/consoleclidownloads/oc-cli-downloads" 2>/dev/null \
+            | sed -n "s|.*\"href\":[[:space:]]*\"\\([^\"]*/${CLI_ARCH}/linux/oc\\.tar\\)\".*|\\1|p" | head -1) || true
+          if [[ -n "$url" ]]; then
+            is_tar=true
+          else
+            local ver
+            ver=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+              "${APISERVER}/apis/config.openshift.io/v1/clusterversions/version" \
+              | sed -n 's/.*"version":[[:space:]]*"\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/p' | head -1) || true
+            url="https://mirror.openshift.com/pub/openshift-v4/${CLI_ARCH}/clients/ocp/${ver:-stable}/openshift-client-linux.tar.gz"
+          fi
+          echo "Installing oc (${CLI_ARCH}) from ${url}..."
+          if [[ "$is_tar" == true ]]; then
+            curl -ksSfL "$url" | tar xf - -C "$TOOLS_BIN" oc kubectl
+          else
+            curl -ksSfL "$url" | tar xzf - -C "$TOOLS_BIN" oc kubectl
+          fi
         }
 
         install_tkn() {

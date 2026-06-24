@@ -64,13 +64,26 @@ spec:
         install_cached_oc() {
           local tools=$1 cli_arch=$2
           [[ -x "${tools}/oc" ]] && return 0
-          local ver
-          ver=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
-            "${APISERVER}/apis/config.openshift.io/v1/clusterversions/version" \
-            | sed -n 's/.*"version":[[:space:]]*"\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/p' | head -1) || true
-          echo "Downloading oc ${ver:-stable} (${cli_arch}) → ${tools}"
-          curl -sSfL "https://mirror.openshift.com/pub/openshift-v4/${cli_arch}/clients/ocp/${ver:-stable}/openshift-client-linux.tar.gz" \
-            | tar xz -C "$tools" oc kubectl
+          local url="" is_tar=false
+          # ConsoleCLIDownload serves oc matching the exact cluster version
+          url=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+            "${APISERVER}/apis/console.openshift.io/v1/consoleclidownloads/oc-cli-downloads" 2>/dev/null \
+            | sed -n "s|.*\"href\":[[:space:]]*\"\\([^\"]*/${cli_arch}/linux/oc\\.tar\\)\".*|\\1|p" | head -1) || true
+          if [[ -n "$url" ]]; then
+            is_tar=true
+          else
+            local ver
+            ver=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+              "${APISERVER}/apis/config.openshift.io/v1/clusterversions/version" \
+              | sed -n 's/.*"version":[[:space:]]*"\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/p' | head -1) || true
+            url="https://mirror.openshift.com/pub/openshift-v4/${cli_arch}/clients/ocp/${ver:-stable}/openshift-client-linux.tar.gz"
+          fi
+          echo "Downloading oc (${cli_arch}) from ${url} → ${tools}"
+          if [[ "$is_tar" == true ]]; then
+            curl -ksSfL "$url" | tar xf - -C "$tools" oc kubectl
+          else
+            curl -ksSfL "$url" | tar xzf - -C "$tools" oc kubectl
+          fi
         }
 
         install_cached_tkn() {
