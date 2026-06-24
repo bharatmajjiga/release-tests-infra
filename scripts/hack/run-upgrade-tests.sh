@@ -62,22 +62,56 @@ command -v oc >/dev/null || die "oc CLI required"
 NS="${NAMESPACE:-pipelines-ci}"
 INSTALLER="${INSTALLER:-aws-ipi}"
 
+# For cluster-platforms/cp: auto-detect OCP version from running cluster
+case "${INSTALLER,,}" in
+  cluster-platforms|cp)
+    # shellcheck source=cluster-login.sh
+    source "$SCRIPT_DIR/cluster-login.sh"
+    cluster_login || die "cluster login failed"
+    if [[ -z "${OPENSHIFT_VERSION:-}" || "${OPENSHIFT_VERSION}" == stable* ]]; then
+      OPENSHIFT_VERSION=$(oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null || true)
+      [[ -n "$OPENSHIFT_VERSION" ]] || die "Could not detect OCP version from cluster"
+      echo "Auto-detected OCP version: ${OPENSHIFT_VERSION}"
+    fi
+    ;;
+esac
+
 # --- Validate required vars ---
 missing=()
 for v in PRE_UPGRADE_VERSION UPGRADE_VERSION INSTALLER TEST_FRAMEWORK; do
   [[ -n "${!v:-}" ]] || missing+=("$v")
 done
 
-if [[ "${INSTALLER,,}" == "aws-ipi" ]]; then
-  for v in OPENSHIFT_VERSION; do
-    [[ -n "${!v:-}" ]] || missing+=("$v")
-  done
-  # Check secrets on cluster
-  oc get secret aws-creds -n "$NS" &>/dev/null \
-    || missing+=("aws-creds secret (run ./scripts/hack/create-secrets.sh with INSTALLER=aws-ipi)")
-  oc get secret aws-install-config -n "$NS" &>/dev/null \
-    || missing+=("aws-install-config secret (run ./scripts/hack/create-secrets.sh with INSTALLER=aws-ipi)")
-fi
+case "${INSTALLER,,}" in
+  aws-ipi)
+    [[ -n "${OPENSHIFT_VERSION:-}" ]] || missing+=("OPENSHIFT_VERSION")
+    oc get secret aws-creds -n "$NS" &>/dev/null \
+      || missing+=("aws-creds secret (run ./scripts/hack/create-secrets.sh with INSTALLER=aws-ipi)")
+    oc get secret aws-install-config -n "$NS" &>/dev/null \
+      || missing+=("aws-install-config secret (run ./scripts/hack/create-secrets.sh with INSTALLER=aws-ipi)")
+    ;;
+  aro)
+    [[ -n "${OPENSHIFT_VERSION:-}" ]] || missing+=("OPENSHIFT_VERSION")
+    oc get secret azure-creds -n "$NS" &>/dev/null \
+      || missing+=("azure-creds secret (run ./scripts/hack/create-secrets.sh with INSTALLER=aro)")
+    ;;
+  cluster-platforms|cp)
+    cluster_secret_exists "$NS" \
+      || missing+=("cluster secret $(cluster_secret_name) (run ./scripts/hack/setup-pipelines-ci.sh)")
+    ;;
+esac
+
+# Validate pre-upgrade operator environment
+OPERATOR_ENVIRONMENT="${PRE_UPGRADE_OPERATOR_ENVIRONMENT:-prod}" \
+  CATALOG_SOURCE="${PRE_UPGRADE_CATALOG_SOURCE:-redhat-operators}" \
+  KONFLUX_INDEX_IMAGE="${PRE_UPGRADE_KONFLUX_INDEX_IMAGE:-}" \
+  validate_operator_env || missing+=("PRE_UPGRADE env/catalog mismatch (see error above)")
+
+# Validate upgrade operator environment
+OPERATOR_ENVIRONMENT="${UPGRADE_OPERATOR_ENVIRONMENT:-pre-stage}" \
+  CATALOG_SOURCE="${UPGRADE_CATALOG_SOURCE:-custom-operators}" \
+  KONFLUX_INDEX_IMAGE="${UPGRADE_KONFLUX_INDEX_IMAGE:-}" \
+  validate_operator_env || missing+=("UPGRADE env/catalog mismatch (see error above)")
 
 FW="$(printf '%s' "${TEST_FRAMEWORK:-gauge}" | tr '[:upper:]' '[:lower:]')"
 case "$FW" in
@@ -109,7 +143,7 @@ TAGS="${TAGS:-$([ "$FW" = ginkgo ] && echo sanity || echo e2e)}"
 
 # Build descriptive PipelineRun name: upgrade-tests-aro-1212-to-1222-on-419-
 case "${INSTALLER,,}" in
-  cluster-platforms) _installer_tag="cp-" ;;
+  cluster-platforms|cp) _installer_tag="cp-" ;;
   aws-ipi|aro|rosa) _installer_tag="${INSTALLER,,}-" ;;
   *) _installer_tag="" ;;
 esac
@@ -165,7 +199,7 @@ spec:
     - name: TEST_FRAMEWORK
       value: "${FW}"
     - name: IMAGE
-      value: "${IMAGE:-registry.access.redhat.com/ubi9/go-toolset:latest}"
+      value: "${IMAGE:-quay.io/openshift-pipeline/ci:latest}"
     - name: TKN_DOWNLOAD_URL
       value: "${TKN_DOWNLOAD_URL:-}"
     - name: TAGS

@@ -7,7 +7,7 @@ spec:
     - name: TEST_FRAMEWORK
       default: gauge
     - name: IMAGE
-      default: registry.access.redhat.com/ubi9/go-toolset:latest
+      default: quay.io/openshift-pipeline/ci:latest
     - name: OSP_VERSION
       default: ""
     - name: TKN_DOWNLOAD_URL
@@ -48,7 +48,16 @@ spec:
               "s|/content-gateway/rest/browse/pub/cgw/pipelines/([^/]+)/?.*|/content-gateway/file/pub/cgw/pipelines/\1/tkn-linux-${cli_arch}.tar.gz|" \
               | sed -E "s/tkn-linux-[a-z0-9]+\.tar\.gz/tkn-linux-${cli_arch}.tar.gz/"
           else
-            echo "https://developers.redhat.com/content-gateway/file/pub/cgw/pipelines/${osp_ver}/tkn-linux-${cli_arch}.tar.gz"
+            # Auto-discover from cluster's ConsoleCLIDownload (created by operator)
+            local cluster_url=""
+            cluster_url=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+              "${APISERVER}/apis/console.openshift.io/v1/consoleclidownloads/tkn" 2>/dev/null \
+              | sed -n "s|.*\"href\":[[:space:]]*\"\\([^\"]*tkn-linux-${cli_arch}\\.tar\\.gz\\)\".*|\\1|p" | head -1) || true
+            if [[ -n "$cluster_url" ]]; then
+              echo "$cluster_url"
+            else
+              echo "https://developers.redhat.com/content-gateway/file/pub/cgw/pipelines/${osp_ver}/tkn-linux-${cli_arch}.tar.gz"
+            fi
           fi
         }
 
@@ -72,19 +81,8 @@ spec:
           archive="/tmp/tkn-linux-${cli_arch}.tar.gz"
           echo "Downloading tkn/opc from ${url} → ${tools}"
           tmp="${archive}.part.$$"; jar=$(mktemp)
-          curl -fsSL -c "$jar" -b "$jar" "$url" -o "$tmp" && rm -f "$jar" && mv "$tmp" "$archive"
+          curl -kfsSL -c "$jar" -b "$jar" "$url" -o "$tmp" && rm -f "$jar" && mv "$tmp" "$archive"
           tar xzf "$archive" -C "$tools" --strip-components=1
-        }
-
-        install_cached_jq() {
-          local tools=$1 cli_arch=$2
-          [[ -x "${tools}/jq" ]] && return 0
-          local jq_arch="$cli_arch"
-          [[ "$jq_arch" == "amd64" ]] && jq_arch="amd64"
-          [[ "$jq_arch" == "arm64" ]] && jq_arch="arm64"
-          local url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-${jq_arch}"
-          echo "Downloading jq → ${tools}"
-          curl -fsSL "$url" -o "${tools}/jq" && chmod +x "${tools}/jq"
         }
 
         gomod_hash() {
@@ -176,8 +174,6 @@ spec:
             cli_arch=$(pod_arch)
             install_cached_oc "$tools" "$cli_arch"
             install_cached_tkn "$tools" "$cli_arch" "$(params.OSP_VERSION)" "$(params.TKN_DOWNLOAD_URL)"
-            install_cached_jq "$tools" "$cli_arch"
-
             touch "${tools}/.ready"
           ) 9>"$lock"
         }

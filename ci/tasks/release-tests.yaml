@@ -21,7 +21,7 @@ spec:
   - name: FAIL_ON_ERROR
     default: "false"
   - name: IMAGE
-    default: quay.io/openshift-pipeline/ci
+    default: quay.io/openshift-pipeline/ci:latest
   - name: IS_DISCONNECTED
     default: "false"
   - name: JIB_MAVEN_REPOSITORY
@@ -97,6 +97,12 @@ spec:
             secretKeyRef:
               name: github
               key: github-token
+              optional: true
+        - name: CHAINS_DOCKER_CONFIG_JSON
+          valueFrom:
+            secretKeyRef:
+              name: quay-io-dockerconfig
+              key: config.json
               optional: true
         - name: ADMIN_NAME
           valueFrom:
@@ -192,7 +198,15 @@ spec:
               "s|/content-gateway/rest/browse/pub/cgw/pipelines/([^/]+)/?.*|/content-gateway/file/pub/cgw/pipelines/\1/tkn-linux-${CLI_ARCH}.tar.gz|" \
               | sed -E "s/tkn-linux-[a-z0-9]+\.tar\.gz/tkn-linux-${CLI_ARCH}.tar.gz/"
           else
-            echo "https://developers.redhat.com/content-gateway/file/pub/cgw/pipelines/${OSP_VER}/tkn-linux-${CLI_ARCH}.tar.gz"
+            local cluster_url=""
+            cluster_url=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+              "${APISERVER}/apis/console.openshift.io/v1/consoleclidownloads/tkn" 2>/dev/null \
+              | sed -n "s|.*\"href\":[[:space:]]*\"\\([^\"]*tkn-linux-${CLI_ARCH}\\.tar\\.gz\\)\".*|\\1|p" | head -1) || true
+            if [[ -n "$cluster_url" ]]; then
+              echo "$cluster_url"
+            else
+              echo "https://developers.redhat.com/content-gateway/file/pub/cgw/pipelines/${OSP_VER}/tkn-linux-${CLI_ARCH}.tar.gz"
+            fi
           fi
         }
 
@@ -219,7 +233,7 @@ spec:
           if [[ ! -s "$archive" ]]; then
             echo "Downloading tkn/opc from ${url}..."
             tmp="${archive}.part.$$"; jar=$(mktemp)
-            curl -fsSL -c "$jar" -b "$jar" "$url" -o "$tmp" && rm -f "$jar" && mv "$tmp" "$archive"
+            curl -kfsSL -c "$jar" -b "$jar" "$url" -o "$tmp" && rm -f "$jar" && mv "$tmp" "$archive"
           fi
           tar xzf "$archive" -C "$TOOLS_BIN" --strip-components=1
         }
@@ -241,19 +255,9 @@ spec:
           GOBIN="$TOOLS_BIN" go install github.com/onsi/ginkgo/v2/ginkgo
         }
 
-        install_jq() {
-          local jq_arch
-          jq_arch=$(pod_arch)
-          [[ "$jq_arch" == "amd64" ]] || true
-          echo "Downloading jq (${jq_arch})..."
-          curl -fsSL "https://github.com/jqlang/jq/releases/latest/download/jq-linux-${jq_arch}" \
-            -o "$TOOLS_BIN/jq" && chmod +x "$TOOLS_BIN/jq"
-        }
-
         ensure_toolchain() {
           [[ -x "${CACHED_TOOLS_BIN:-}/oc" || -x "$TOOLS_BIN/oc" ]] || install_oc
           [[ (-x "${CACHED_TOOLS_BIN:-}/tkn" && -x "${CACHED_TOOLS_BIN:-}/opc") || (-x "$TOOLS_BIN/tkn" && -x "$TOOLS_BIN/opc") ]] || install_tkn
-          [[ -x "${CACHED_TOOLS_BIN:-}/jq" || -x "$TOOLS_BIN/jq" ]] || command -v jq >/dev/null || install_jq
           case "$FRAMEWORK" in
             gauge)  ensure_gauge ;;
             ginkgo) ensure_ginkgo ;;
@@ -388,7 +392,8 @@ spec:
               gauge run --tags="${tags}" --log-level=debug --verbose "${target}" 2>&1 | tee "$log"
           else
             ARCH="$(params.ARCH)" gauge_reports_dir="${report_path}" logs_directory="${report_path}" \
-              gauge run --tags="${tags}" --max-retries-count=3 --retry-only "${tags}" \
+              # gauge run --tags="${tags}" --max-retries-count=3 --retry-only "${tags}" \
+              gauge run --tags="${tags}" \
               --log-level=debug --verbose "${target}" 2>&1 | tee "$log"
           fi
           if grep -q "No specifications found" "$log"; then

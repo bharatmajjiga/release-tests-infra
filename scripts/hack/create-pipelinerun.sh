@@ -150,7 +150,7 @@ spec:
     - name: TEST_FRAMEWORK
       value: "${FW}"
     - name: IMAGE
-      value: "${IMAGE:-registry.access.redhat.com/ubi9/go-toolset:latest}"
+      value: "${IMAGE:-quay.io/openshift-pipeline/ci:latest}"
     - name: TKN_DOWNLOAD_URL
       value: "${TKN_DOWNLOAD_URL:-}"
     - name: INSTALL_PIPELINES_OPERATOR
@@ -179,7 +179,7 @@ EOF
     - name: SEND_SLACK_NOTIFICATION
       value: "${SEND_SLACK_NOTIFICATION}"
   timeouts:
-    pipeline: 1h
+    pipeline: 2h
   workspaces:
 EOF
   write_workspace_spec >> "$pr"
@@ -205,6 +205,8 @@ preflight() {
   [[ "$FW" != gauge || -n "${GIT_RELEASE_TESTS_BRANCH:-}" ]] \
     || die "GIT_RELEASE_TESTS_BRANCH required when TEST_FRAMEWORK=gauge"
 
+  validate_operator_env || exit 1
+
   cluster_secret_exists "$NS" \
     || die "secret $(cluster_secret_name) missing in $NS (run ./scripts/hack/setup-pipelines-ci.sh)"
   oc get pipeline acceptance-tests -n "$NS" &>/dev/null \
@@ -229,7 +231,7 @@ TAGS="${TAGS:-$([ "$FW" = ginkgo ] && echo sanity || echo e2e)}"
 
 # Build descriptive PipelineRun name: acceptance-tests-aro-1222-prod-on-420-
 case "${INSTALLER,,}" in
-  cluster-platforms) _installer_tag="cp-" ;;
+  cluster-platforms|cp) _installer_tag="cp-" ;;
   aws-ipi|aro|rosa) _installer_tag="${INSTALLER,,}-" ;;
   *) _installer_tag="" ;;
 esac

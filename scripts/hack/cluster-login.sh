@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 cluster_platforms() {
-  [[ "$(printf '%s' "${INSTALLER:-none}" | tr '[:upper:]' '[:lower:]')" == cluster-platforms ]]
+  case "$(printf '%s' "${INSTALLER:-none}" | tr '[:upper:]' '[:lower:]')" in
+    cluster-platforms|cp) return 0 ;; *) return 1 ;; esac
 }
 
 validate_cluster_env() {
@@ -89,6 +90,33 @@ validate_cluster_env_or_provisioned() {
     return 0
   fi
   validate_cluster_env
+}
+
+validate_operator_env() {
+  local env="${OPERATOR_ENVIRONMENT:-prod}" src="${CATALOG_SOURCE:-redhat-operators}"
+  local idx="${KONFLUX_INDEX_IMAGE:-}"
+  case "${env,,}" in
+    prod)
+      if [[ "$src" != "redhat-operators" ]]; then
+        echo "ERROR: OPERATOR_ENVIRONMENT=prod requires CATALOG_SOURCE=redhat-operators (got: ${src})" >&2
+        return 1
+      fi
+      ;;
+    stage|pre-stage)
+      if [[ "$src" == "redhat-operators" ]]; then
+        echo "ERROR: OPERATOR_ENVIRONMENT=${env} requires CATALOG_SOURCE=custom-operators (got: ${src})" >&2
+        return 1
+      fi
+      if [[ -z "$idx" ]]; then
+        echo "ERROR: OPERATOR_ENVIRONMENT=${env} requires KONFLUX_INDEX_IMAGE to be set" >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "ERROR: OPERATOR_ENVIRONMENT must be prod, stage, or pre-stage (got: ${env})" >&2
+      return 1
+      ;;
+  esac
 }
 
 secret_installer() {

@@ -204,6 +204,31 @@ esac
 
 ensure_namespace
 create_cluster_secret
+
+# Add Quay credentials to global pull-secret for stage/pre-stage index images
+if [[ -n "${QUAY_USER:-}" && -n "${QUAY_PASS:-}" ]]; then
+  echo "=== Updating global pull-secret with Quay credentials ==="
+  _tmpps=$(mktemp)
+  oc get secret pull-secret -n openshift-config -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null \
+    | base64 -d > "$_tmpps"
+  if [[ -s "$_tmpps" ]]; then
+    export QUAY_B64=$(echo -n "${QUAY_USER}:${QUAY_PASS}" | base64)
+    python3 -c "
+import json, os
+with open('$_tmpps') as f:
+    d = json.load(f)
+d['auths']['quay.io'] = {'auth': os.environ['QUAY_B64']}
+with open('$_tmpps', 'w') as f:
+    json.dump(d, f)
+" && \
+    oc set data secret/pull-secret -n openshift-config --from-literal=".dockerconfigjson=$(cat "$_tmpps")" && \
+    echo "  quay.io auth added (${QUAY_USER})" || \
+    echo "  WARNING: failed to update global pull-secret"
+    unset QUAY_B64
+  fi
+  rm -f "$_tmpps"
+fi
+
 install_pipelines_operator
 verify_pipelines_install
 enable_pipelines_console_plugin

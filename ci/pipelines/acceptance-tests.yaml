@@ -34,7 +34,7 @@ spec:
     default: gauge
   - name: IMAGE
     description: Container image for running tests
-    default: registry.access.redhat.com/ubi9/go-toolset:latest
+    default: quay.io/openshift-pipeline/ci:latest
   - name: INSTALL_PIPELINES_OPERATOR
     description: Install the Openshift Pipelines operator
     default: "true"

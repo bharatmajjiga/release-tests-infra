@@ -44,7 +44,7 @@ spec:
     description: gauge or ginkgo
     default: gauge
   - name: IMAGE
-    default: registry.access.redhat.com/ubi9/go-toolset:latest
+    default: quay.io/openshift-pipeline/ci:latest
   - name: TKN_DOWNLOAD_URL
     default: ""
   - name: TAGS
