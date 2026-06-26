@@ -97,16 +97,45 @@ spec:
         CLUSTER_SUFFIX="$(printf '%(%m%d)T')$(echo '$(context.taskRun.uid)' | cut -c1-3)"
         CLUSTER_NAME="${CLUSTER_PREFIX}${CLUSTER_SUFFIX}"
         CREATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        ARCH_SHORT="$(echo '$(params.ARCH)' | cut -d/ -f2)"
-        [[ -z "$ARCH_SHORT" ]] && ARCH_SHORT=amd64
+        # ARCH param = target cluster arch; POD_ARCH = management cluster arch (for binary download)
+        TARGET_ARCH="$(echo '$(params.ARCH)' | cut -d/ -f2)"
+        [[ -z "$TARGET_ARCH" ]] && TARGET_ARCH=amd64
+        POD_ARCH=$(case "$(uname -m)" in aarch64) echo arm64 ;; x86_64) echo amd64 ;; ppc64le) echo ppc64le ;; s390x) echo s390x ;; *) uname -m ;; esac)
 
-        echo "=== Downloading openshift-install ==="
-        MIRROR="https://mirror.openshift.com/pub/openshift-v4/${ARCH_SHORT}/clients/ocp"
+        echo "=== Downloading openshift-install (pod arch: ${POD_ARCH}, target arch: ${TARGET_ARCH}) ==="
+        MIRROR="https://mirror.openshift.com/pub/openshift-v4/${POD_ARCH}/clients/ocp"
         VERSION="$(params.OPENSHIFT_VERSION)"
         DL_URL="${MIRROR}/${VERSION}"
         [[ "$VERSION" == *dev-preview* ]] && DL_URL="${MIRROR}-${VERSION}"
-        curl -sL "${DL_URL}/openshift-install-linux.tar.gz" | tar xz -C /usr/local/bin openshift-install
+
+        INSTALL_ARCHIVE="openshift-install-linux.tar.gz"
+        if [[ "$TARGET_ARCH" != "$POD_ARCH" ]]; then
+          echo "Cross-arch provisioning: pod=${POD_ARCH}, target=${TARGET_ARCH}"
+          # Get the exact version from the release.txt, then use the -multi tag
+          OCP_VER=$(curl -sL "${DL_URL}/release.txt" 2>/dev/null \
+            | sed -n 's/^Name:[[:space:]]*//p' | head -1) || true
+          if [[ -n "$OCP_VER" ]]; then
+            MULTI_IMAGE="quay.io/openshift-release-dev/ocp-release:${OCP_VER}-multi"
+            export OPENSHIFT_INSTALL_RELEASE_IMAGE_OVERRIDE="$MULTI_IMAGE"
+            echo "Using multi-arch release: ${MULTI_IMAGE}"
+          else
+            echo "ERROR: Could not determine OCP version for multi-arch release"
+            echo "  Cross-arch provisioning (${POD_ARCH} → ${TARGET_ARCH}) requires multi-arch release image"
+            exit 1
+          fi
+        fi
+        echo "Downloading ${DL_URL}/${INSTALL_ARCHIVE}"
+        curl -sfL "${DL_URL}/${INSTALL_ARCHIVE}" | tar xz -C /usr/local/bin openshift-install
         openshift-install version
+
+        # Select instance types based on target architecture
+        WORKER_TYPE="$(params.WORKER_TYPE)"
+        MASTER_TYPE="$(params.MASTER_TYPE)"
+        if [[ "$TARGET_ARCH" == "arm64" ]]; then
+          [[ "$WORKER_TYPE" == m5.* ]] && WORKER_TYPE="${WORKER_TYPE/m5./m6g.}"
+          [[ "$MASTER_TYPE" == m5.* ]] && MASTER_TYPE="${MASTER_TYPE/m5./m6g.}"
+          echo "ARM64 target — instance types: worker=${WORKER_TYPE}, master=${MASTER_TYPE}"
+        fi
 
         echo "=== Generating install-config.yaml ==="
         mkdir -p install-dir
@@ -116,21 +145,21 @@ spec:
         metadata:
           name: ${CLUSTER_NAME}
         compute:
-        - architecture: ${ARCH_SHORT}
+        - architecture: ${TARGET_ARCH}
           hyperthreading: Enabled
           name: worker
           replicas: $(params.WORKER_REPLICAS)
           platform:
             aws:
-              type: $(params.WORKER_TYPE)
+              type: ${WORKER_TYPE}
         controlPlane:
-          architecture: ${ARCH_SHORT}
+          architecture: ${TARGET_ARCH}
           hyperthreading: Enabled
           name: master
           replicas: 3
           platform:
             aws:
-              type: $(params.MASTER_TYPE)
+              type: ${MASTER_TYPE}
         networking:
           networkType: OVNKubernetes
           clusterNetwork:
@@ -153,6 +182,7 @@ spec:
         pullSecret: '${PULL_SECRET}'
         sshKey: '${SSH_PUBLIC_KEY}'
         EOCFG
+
         sed -i 's/^        //' install-dir/install-config.yaml
 
         echo "=== Creating cluster ${CLUSTER_NAME} on $(params.BASE_DOMAIN) ==="
@@ -302,7 +332,6 @@ spec:
           --master-vm-size Standard_D8s_v3
           --worker-vm-size Standard_D4s_v3
           --worker-count 3
-          --fips
         )
         if [[ -n "${PULL_SECRET:-}" ]]; then
           echo "$PULL_SECRET" > /tmp/pull-secret.json
@@ -380,6 +409,15 @@ spec:
           echo "Cluster already provisioned by previous step"
           exit 0
         fi
+
+        # If installer requires provisioning but previous step failed, fail explicitly
+        case "$INSTALLER" in
+          aws-ipi|aro|rosa)
+            echo "ERROR: INSTALLER=${INSTALLER} provisioning step failed — check aws-ipi/aro step logs"
+            echo "  Ensure aws-creds, aws-install-config (or azure-creds) secrets exist in pipelines-ci"
+            exit 1
+            ;;
+        esac
 
         echo "INSTALLER=${INSTALLER} — using existing cluster"
         echo -n "$(params.CLUSTER_NAME)" > "$(results.cluster-name.path)"

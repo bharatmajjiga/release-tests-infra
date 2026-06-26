@@ -43,13 +43,35 @@ parse_test_suites() {
   done
 }
 
+ci_config_get() {
+  local ver="$1" key="$2" cfg="${REPO_ROOT}/ci-config.yaml"
+  [[ -f "$cfg" ]] || return 1
+  python3 -c "
+import yaml, sys
+with open('$cfg') as f:
+    c = yaml.safe_load(f)
+ver = '$ver'
+keys = '$key'.split('.')
+v = c.get(ver)
+if v is None:
+    sys.exit(1)
+for k in keys:
+    if isinstance(v, dict):
+        v = v.get(k)
+    else:
+        sys.exit(1)
+if v is None:
+    sys.exit(1)
+print(v, end='')
+" 2>/dev/null
+}
+
 resolve_channel() {
-  local ver=$1 ch=$2
+  local ver=$1 ch=$2 short="${1%.*}"
   if [[ -z "$ch" || "$ch" == latest ]]; then
-    printf 'pipelines-%s' "${ver%.*}"
-  else
-    printf '%s' "$ch"
+    ch=$(ci_config_get "$short" channel) || ch="pipelines-${short}"
   fi
+  printf '%s' "$ch"
 }
 
 [[ -f "$ENV_FILE" ]] || die "missing $ENV_FILE (cp env.template .env)"

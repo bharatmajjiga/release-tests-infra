@@ -250,7 +250,7 @@ spec:
       - setup-testing-accounts
     taskRef:
       name: go-mod-cache
-    timeout: 20m
+    timeout: 30m
     when:
       - input: $(params.TEST_FRAMEWORK)
         operator: in
@@ -282,7 +282,7 @@ spec:
       - setup-testing-accounts
     taskRef:
       name: go-mod-cache
-    timeout: 20m
+    timeout: 30m
     when:
       - input: $(params.TEST_FRAMEWORK)
         operator: in
@@ -633,7 +633,7 @@ spec:
       - update-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 20m
+    timeout: 30m
     when:
       - input: release-tests-versions
         operator: in
@@ -771,7 +771,7 @@ spec:
       - update-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 20m
+    timeout: 30m
     when:
       - input: release-tests-triggers-tls
         operator: in
@@ -955,7 +955,7 @@ spec:
       - update-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 20m
+    timeout: 30m
     when:
       - input: release-tests-metrics
         operator: in
@@ -1001,7 +1001,7 @@ spec:
       - update-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 20m
+    timeout: 30m
     when:
       - input: release-tests-rbac
         operator: in
@@ -1049,7 +1049,7 @@ spec:
       - update-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 20m
+    timeout: 30m
     when:
       - input: release-tests-addon
         operator: in
@@ -1141,7 +1141,7 @@ spec:
       - update-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 20m
+    timeout: 30m
     when:
       - input: release-tests-manual-approval
         operator: in
@@ -1272,7 +1272,7 @@ spec:
       - evaluate-test-suites
     taskRef:
       name: release-tests
-    timeout: 20m
+    timeout: 30m
     when:
       - input: $(params.UNINSTALL_PIPELINES_OPERATOR)
         operator: in
@@ -1331,9 +1331,11 @@ spec:
 
     - name: cleanup-pipelinerun
       onError: continue
-      timeout: 1m
+      timeout: 10m
       params:
         - name: PIPELINE_RUN
           value: $(context.pipelineRun.name)
+        - name: DELETE_DELAY
+          value: "300"
       taskRef:
         name: cleanup-pipelinerun

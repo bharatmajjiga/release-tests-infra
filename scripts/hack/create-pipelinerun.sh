@@ -75,11 +75,47 @@ parse_test_suites() {
   ((${#TEST_SUITE_ITEMS[@]})) || TEST_SUITE_ITEMS=(release-tests-versions)
 }
 
-resolve_channel() {
+ci_config_get() {
+  local ver="$1" key="$2" cfg="${REPO_ROOT}/ci-config.yaml"
+  [[ -f "$cfg" ]] || return 1
+  python3 -c "
+import yaml, sys
+with open('$cfg') as f:
+    c = yaml.safe_load(f)
+ver = '$ver'
+keys = '$key'.split('.')
+v = c.get(ver)
+if v is None:
+    sys.exit(1)
+for k in keys:
+    if isinstance(v, dict):
+        v = v.get(k)
+    else:
+        sys.exit(1)
+if v is None:
+    sys.exit(1)
+print(v, end='')
+" 2>/dev/null
+}
+
+resolve_from_ci_config() {
   [[ -n "${OPERATOR_VERSION:-}" ]] || die "OPERATOR_VERSION required in .env"
+  local ver="${OPERATOR_VERSION%.*}"
+
   if [[ -z "${CHANNEL:-}" || "${CHANNEL}" == latest ]]; then
-    CHANNEL="pipelines-${OPERATOR_VERSION%.*}"
+    CHANNEL=$(ci_config_get "$ver" channel) \
+      || CHANNEL="pipelines-${ver}"
     export CHANNEL
+  fi
+
+  if [[ -z "${GIT_RELEASE_TESTS_BRANCH:-}" ]]; then
+    GIT_RELEASE_TESTS_BRANCH=$(ci_config_get "$ver" release-tests.revision) || true
+    export GIT_RELEASE_TESTS_BRANCH
+  fi
+
+  if [[ -z "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]]; then
+    GIT_RELEASE_TESTS_GINKGO_BRANCH=$(ci_config_get "$ver" release-tests-ginkgo.revision) || true
+    export GIT_RELEASE_TESTS_GINKGO_BRANCH
   fi
 }
 
@@ -135,6 +171,18 @@ spec:
   pipelineRef:
     name: acceptance-tests
   params:
+    - name: INSTALLER
+      value: "${INSTALLER:-cluster-platforms}"
+    - name: BASE_DOMAIN
+      value: "${BASE_DOMAIN:-aws.ospqa.com}"
+    - name: AWS_REGION
+      value: "${AWS_REGION:-us-east-2}"
+    - name: OPENSHIFT_VERSION
+      value: "${OPENSHIFT_VERSION:-stable}"
+    - name: KEEP_CLUSTER
+      value: "${KEEP_CLUSTER:-false}"
+    - name: CLUSTER_LIFETIME
+      value: "${CLUSTER_LIFETIME:-6h}"
     - name: ARCH
       value: "${ARCH:-linux/amd64}"
     - name: CATALOG_SOURCE
@@ -179,7 +227,7 @@ EOF
     - name: SEND_SLACK_NOTIFICATION
       value: "${SEND_SLACK_NOTIFICATION}"
   timeouts:
-    pipeline: 2h
+    pipeline: 3h
   workspaces:
 EOF
   write_workspace_spec >> "$pr"
@@ -200,15 +248,13 @@ preflight() {
   done
 
   case "$FW" in gauge|ginkgo) ;; *) die "TEST_FRAMEWORK must be gauge or ginkgo (got: ${TEST_FRAMEWORK})" ;; esac
-  [[ "$FW" != ginkgo || -n "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]] \
-    || die "GIT_RELEASE_TESTS_GINKGO_BRANCH required when TEST_FRAMEWORK=ginkgo"
-  [[ "$FW" != gauge || -n "${GIT_RELEASE_TESTS_BRANCH:-}" ]] \
-    || die "GIT_RELEASE_TESTS_BRANCH required when TEST_FRAMEWORK=gauge"
 
   validate_operator_env || exit 1
 
-  cluster_secret_exists "$NS" \
-    || die "secret $(cluster_secret_name) missing in $NS (run ./scripts/hack/setup-pipelines-ci.sh)"
+  if ! is_provisioned_installer; then
+    cluster_secret_exists "$NS" \
+      || die "secret $(cluster_secret_name) missing in $NS (run ./scripts/hack/setup-pipelines-ci.sh)"
+  fi
   oc get pipeline acceptance-tests -n "$NS" &>/dev/null \
     || die "pipeline acceptance-tests missing in $NS (run ./scripts/hack/setup-pipelines-ci.sh)"
 
@@ -225,7 +271,12 @@ load_env
 preflight
 
 parse_test_suites
-resolve_channel
+resolve_from_ci_config
+
+[[ "$FW" != ginkgo || -n "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]] \
+  || die "GIT_RELEASE_TESTS_GINKGO_BRANCH required for ginkgo (set in .env or add to ci-config.yaml)"
+[[ "$FW" != gauge || -n "${GIT_RELEASE_TESTS_BRANCH:-}" ]] \
+  || die "GIT_RELEASE_TESTS_BRANCH required for gauge (set in .env or add to ci-config.yaml)"
 
 TAGS="${TAGS:-$([ "$FW" = ginkgo ] && echo sanity || echo e2e)}"
 

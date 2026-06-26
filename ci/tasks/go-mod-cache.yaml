@@ -80,10 +80,11 @@ spec:
           fi
           echo "Downloading oc (${cli_arch}) from ${url} → ${tools}"
           if [[ "$is_tar" == true ]]; then
-            curl -ksSfL "$url" | tar xf - -C "$tools" oc kubectl
+            curl -ksSfL "$url" | tar xf - -C "$tools" oc 2>/dev/null || true
           else
-            curl -ksSfL "$url" | tar xzf - -C "$tools" oc kubectl
+            curl -ksSfL "$url" | tar xzf - -C "$tools" oc 2>/dev/null || true
           fi
+          [[ -x "${tools}/oc" ]] && ln -sf oc "${tools}/kubectl" || true
         }
 
         install_cached_tkn() {
@@ -136,7 +137,12 @@ spec:
           local repo=$1 key=$2 fw=$3 lock="${GOMODCACHE_ROOT}/.lock"
           local gomod="${GOMODCACHE_ROOT}/${key}/gomod"
           local tools="${GOMODCACHE_ROOT}/${key}/tools/bin"
-          mkdir -p "$gomod" "$tools"
+          local gobuild="${GOMODCACHE_ROOT}/${key}/gobuild"
+          mkdir -p "$gomod" "$tools" "$gobuild"
+
+          # Redirect all Go caches to the workspace PVC (avoids /opt/app-root permission issues)
+          export GOMODCACHE="$gomod" GOCACHE="$gobuild" GOPATH="${GOMODCACHE_ROOT}/${key}/gopath"
+          mkdir -p "$GOPATH"
 
           (
             flock -w 900 9 || { echo "ERROR: gomod lock timeout"; exit 1; }
@@ -149,9 +155,9 @@ spec:
               echo "Using vendored dependencies in ${repo}"
             else
               echo "go mod download → ${gomod}"
-              (cd "$repo" && GOMODCACHE="$gomod" go mod download)
+              (cd "$repo" && go mod download)
               echo "go build ./... (warm compile deps)"
-              (cd "$repo" && GOMODCACHE="$gomod" go build -mod=readonly ./...) \
+              (cd "$repo" && go build -mod=readonly ./...) \
                 || echo "WARN: go build ./... failed; go mod download cache is still usable"
             fi
             touch "${gomod}/.ready"
@@ -159,25 +165,36 @@ spec:
             case "$fw" in
               ginkgo)
                 if [[ ! -x "${tools}/ginkgo" ]]; then
-                  echo "go install ginkgo → ${tools}"
-                  (cd "$repo" && GOMODCACHE="$gomod" GOBIN="$tools" \
-                    go install github.com/onsi/ginkgo/v2/ginkgo)
+                  if command -v ginkgo &>/dev/null; then
+                    echo "copying preinstalled ginkgo → ${tools}"
+                    cp "$(command -v ginkgo)" "${tools}/ginkgo"
+                  else
+                    echo "go install ginkgo → ${tools}"
+                    (cd "$repo" && GOBIN="$tools" \
+                      go install github.com/onsi/ginkgo/v2/ginkgo)
+                  fi
                 fi
                 ;;
               *)
                 if [[ ! -x "${tools}/gauge" ]]; then
-                  echo "go install gauge → ${tools}"
-                  GOMODCACHE="$gomod" GOBIN="$tools" go install github.com/getgauge/gauge@v1.6.25
+                  if command -v gauge &>/dev/null; then
+                    echo "copying preinstalled gauge → ${tools}"
+                    cp "$(command -v gauge)" "${tools}/gauge"
+                  else
+                    echo "go install gauge → ${tools}"
+                    GOBIN="$tools" go install github.com/getgauge/gauge@v1.6.25
+                  fi
                 fi
                 local gauge_home="${GOMODCACHE_ROOT}/${key}/gauge-home"
                 if [[ ! -f "${gauge_home}/.ready" ]]; then
-                  mkdir -p "$gauge_home"
+                  mkdir -p "$gauge_home/config"
+                  touch "$gauge_home/config/gauge.properties"
                   export GAUGE_HOME="$gauge_home" PATH="${tools}:${PATH}"
+                  gauge config check_updates false
                   gauge install go 2>&1 || true
                   gauge install html-report && gauge install xml-report -v 0.5.3
-                  gauge config check_updates false
-                  gauge config runner_connection_timeout 900000
-                  gauge config runner_request_timeout 600000
+                  gauge config runner_connection_timeout 3600000
+                  gauge config runner_request_timeout 3600000
                   touch "${gauge_home}/.ready"
                 fi
                 ;;

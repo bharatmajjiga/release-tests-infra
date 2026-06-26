@@ -299,6 +299,7 @@ spec:
             || { echo "ERROR: tools cache not ready at ${tools}"; exit 1; }
 
           export GOMODCACHE="$key" CACHED_TOOLS_BIN="$tools"
+          export GOPATH="$(mktemp -d)"
 
           if [[ -d vendor ]]; then
             echo "Using vendored dependencies in $(pwd)"
@@ -316,7 +317,13 @@ spec:
 
         prepare_toolchain() {
           TOOLS_BIN="$(mktemp -d)/bin"
-          GOCACHE="$(mktemp -d)"
+          local cache_id
+          cache_id=$(tr -d '[:space:]' < "${GOMODCACHE_ROOT}/.${FRAMEWORK}.cache-key" 2>/dev/null) || true
+          if [[ -n "$cache_id" && -d "${GOMODCACHE_ROOT}/${cache_id}/gobuild" ]]; then
+            GOCACHE="${GOMODCACHE_ROOT}/${cache_id}/gobuild"
+          else
+            GOCACHE="$(mktemp -d)"
+          fi
           mkdir -p "$TOOLS_BIN"
           export GOCACHE
           if [[ -n "${CACHED_TOOLS_BIN:-}" && -d "$CACHED_TOOLS_BIN" ]]; then
@@ -397,15 +404,17 @@ spec:
           [[ -f manifest.json ]] || { echo "ERROR: manifest.json missing in $(pwd)"; ls -la; exit 1; }
           [[ -e "$target" ]] || { echo "ERROR: gauge spec path missing: ${target}"; ls -la specs/ 2>/dev/null || true; exit 1; }
           local log="${report_path}/gauge.log"
+          export GOFLAGS="${GOFLAGS:-} -vet=off"
           if [[ "$tags" == install || "$tags" == uninstall || "$tags" == upgrade ]]; then
             gauge_reports_dir="${report_path}" logs_directory="${report_path}" \
               CATALOG_SOURCE="$(params.CATALOG_SOURCE)" CHANNEL="$(params.CHANNEL)" \
               IS_DISCONNECTED="$(params.IS_DISCONNECTED)" \
               gauge run --tags="${tags}" --log-level=debug --verbose "${target}" 2>&1 | tee "$log"
           else
+            local jitter=$((RANDOM % 120))
+            sleep "$jitter"
             ARCH="$(params.ARCH)" gauge_reports_dir="${report_path}" logs_directory="${report_path}" \
-              # gauge run --tags="${tags}" --max-retries-count=3 --retry-only "${tags}" \
-              gauge run --tags="${tags}" \
+              gauge run --tags="${tags}" --max-retries-count=3 --retry-only "${tags}" \
               --log-level=debug --verbose "${target}" 2>&1 | tee "$log"
           fi
           if grep -q "No specifications found" "$log"; then

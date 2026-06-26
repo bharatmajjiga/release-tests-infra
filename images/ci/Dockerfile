@@ -46,8 +46,30 @@ RUN LINT_TAG=$(curl -sk https://api.github.com/repos/golangci/golangci-lint/rele
     curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/${LINT_TAG}/golangci-lint-${LINT_TAG#v}-linux-${TARGETARCH}.tar.gz" \
     | tar xz -C /usr/bin --strip-components=1 "golangci-lint-${LINT_TAG#v}-linux-${TARGETARCH}/golangci-lint"
 
-# Azure CLI
-RUN pip3 install --no-cache-dir azure-cli 2>/dev/null || true
+# Gauge (latest)
+RUN go install github.com/getgauge/gauge@latest && \
+    mv "$(go env GOPATH)/bin/gauge" /usr/local/bin/gauge
+
+# Ginkgo (latest)
+RUN go install github.com/onsi/ginkgo/v2/ginkgo@latest && \
+    mv "$(go env GOPATH)/bin/ginkgo" /usr/local/bin/ginkgo
+
+# MinIO mc client (latest stable)
+RUN curl -fsSL "https://dl.min.io/client/mc/release/linux-${TARGETARCH}/mc" \
+    -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc
+
+# ROSA CLI (latest)
+RUN git clone --depth 1 https://github.com/openshift/rosa.git /tmp/rosa && \
+    cd /tmp/rosa && go build -o /usr/local/bin/rosa ./cmd/rosa && \
+    rm -rf /tmp/rosa
+
+# Azure CLI (only for amd64/arm64 — no prebuilt wheels for ppc64le/s390x)
+RUN if [ "$TARGETARCH" = "amd64" ] || [ "$TARGETARCH" = "arm64" ]; then \
+      pip3 install --no-cache-dir azure-cli; \
+    fi
 
 # Alias python
 RUN ln -fs /usr/bin/python3 /usr/bin/python
+
+# Drop back to non-root (UID 1001 from ubi9/go-toolset base)
+USER 1001
