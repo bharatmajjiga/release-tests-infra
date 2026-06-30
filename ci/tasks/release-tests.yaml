@@ -416,7 +416,8 @@ spec:
             local jitter=$((RANDOM % 120))
             sleep "$jitter"
             ARCH="$(params.ARCH)" gauge_reports_dir="${report_path}" logs_directory="${report_path}" \
-              gauge run --tags="${tags}" --max-retries-count=3 --retry-only "${tags}" \
+              # gauge run --tags="${tags}" --max-retries-count=3 --retry-only "${tags}" \
+              gauge run --tags="${tags}" \
               --log-level=debug --verbose "${target}" 2>&1 | tee "$log"
           fi
           if grep -q "No specifications found" "$log"; then
