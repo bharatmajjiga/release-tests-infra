@@ -48,21 +48,24 @@ spec:
           fi
 
           ADMIN_NAME=${ADMIN_NAME:-kubeadmin}
-          if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+          if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
+            echo "Logging in to cluster $(params.CLUSTER_NAME) as user '$ADMIN_NAME' (kubeadmin)"
+            oc login -u $ADMIN_NAME -p $ADMIN_PASSWORD $APISERVER --insecure-skip-tls-verify=true
+          elif [[ -n "${ADMIN_TOKEN:-}" ]]; then
             echo "Logging in to cluster $(params.CLUSTER_NAME) with token"
             oc login --token=$ADMIN_TOKEN $APISERVER --insecure-skip-tls-verify=true
           else
-            echo "Logging in to cluster $(params.CLUSTER_NAME) as user '$ADMIN_NAME'"
-            oc login -u $ADMIN_NAME -p $ADMIN_PASSWORD $APISERVER --insecure-skip-tls-verify=true
+            echo "ERROR: no credentials — set kubeadmin-password or admin-token in cluster secret"
+            exit 1
           fi
 
           config/auth/01-test-auth.sh
 
           # Re-login as admin after auth setup (script may have logged in as test user)
-          if [[ -n "${ADMIN_TOKEN:-}" ]]; then
-            oc login --token=$ADMIN_TOKEN $APISERVER --insecure-skip-tls-verify=true
-          else
+          if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
             oc login -u $ADMIN_NAME -p $ADMIN_PASSWORD $APISERVER --insecure-skip-tls-verify=true
+          elif [[ -n "${ADMIN_TOKEN:-}" ]]; then
+            oc login --token=$ADMIN_TOKEN $APISERVER --insecure-skip-tls-verify=true
           fi
 
           echo -e "\nLogin into cluster using credentials from secret cluster-$(params.CLUSTER_NAME) (kubeadmin-password / admin-token)."

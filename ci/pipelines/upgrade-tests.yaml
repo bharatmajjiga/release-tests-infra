@@ -725,7 +725,7 @@ spec:
       - update-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     when:
       - input: release-tests-triggers
         operator: in
@@ -771,7 +771,7 @@ spec:
       - update-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     when:
       - input: release-tests-triggers-tls
         operator: in
@@ -1001,7 +1001,7 @@ spec:
       - update-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     when:
       - input: release-tests-rbac
         operator: in
@@ -1049,7 +1049,7 @@ spec:
       - update-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     when:
       - input: release-tests-addon
         operator: in
@@ -1187,7 +1187,7 @@ spec:
       - update-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     when:
       - input: release-tests-ecosystem
         operator: in

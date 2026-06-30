@@ -384,10 +384,12 @@ spec:
         login_cluster() {
           local run_as="${1,,}" rc=0
           if [[ "$run_as" == admin ]]; then
-            if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+            if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
+              oc login -u "$ADMIN_NAME" -p "$ADMIN_PASSWORD" "$APISERVER" --insecure-skip-tls-verify=true >/dev/null 2>&1 || rc=$?
+            elif [[ -n "${ADMIN_TOKEN:-}" ]]; then
               oc login --token="$ADMIN_TOKEN" "$APISERVER" --insecure-skip-tls-verify=true >/dev/null 2>&1 || rc=$?
             else
-              oc login -u "$ADMIN_NAME" -p "$ADMIN_PASSWORD" "$APISERVER" --insecure-skip-tls-verify=true >/dev/null 2>&1 || rc=$?
+              echo "ERROR: no admin credentials in cluster secret"; return 1
             fi
           else
             oc login -u user -p "$USER_PASSWORD" "$APISERVER" --insecure-skip-tls-verify=true >/dev/null 2>&1 || rc=$?
@@ -541,7 +543,7 @@ spec:
         trap 'save_results' EXIT
 
         export ADMIN_NAME=${ADMIN_NAME:-kubeadmin} USER_PASSWORD=${USER_PASSWORD:-user}
-        export KUBECONFIG=$HOME/.kube/config OSP_VERSION="${OSP_VER}" PAC_VERSION="${OSP_VER}"
+        export KUBECONFIG=$HOME/.kube/config OSP_VERSION="${OSP_VER}"
         export CHAINS_REPOSITORY="$(params.CHAINS_REPOSITORY)" JIB_MAVEN_REPOSITORY="$(params.JIB_MAVEN_REPOSITORY)"
 
         check_pac_secrets
@@ -550,9 +552,9 @@ spec:
         login_cluster "$(params.RUN_AS)"
         cleanup_stale_s2i_namespaces "$(params.SPECS)"
 
-        # Clean stale upgrade test namespaces from prior runs
+        # Clean stale upgrade test namespaces only before pre-upgrade (not post-upgrade, which needs them)
         tags="$(params.TAGS)"
-        if [[ "$tags" == *pre-upgrade* || "$tags" == *post-upgrade* ]]; then
+        if [[ "$tags" == *pre-upgrade* && "$tags" != *post-upgrade* ]]; then
           stale=$(oc get projects -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
             | grep -E '^releasetest-upgrade-' || true)
           if [[ -n "$stale" ]]; then

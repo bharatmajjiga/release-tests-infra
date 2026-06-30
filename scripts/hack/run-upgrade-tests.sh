@@ -144,13 +144,23 @@ case "$FW" in
   *) missing+=("TEST_FRAMEWORK must be gauge or ginkgo (got: $FW)") ;;
 esac
 
-oc get pipeline upgrade-tests -n "$NS" &>/dev/null \
-  || missing+=("upgrade-tests pipeline (run ./scripts/hack/setup-pipelines-ci.sh)")
-
 if ((${#missing[@]})); then
   echo "ERROR: Missing required configuration:" >&2
   printf '  - %s\n' "${missing[@]}" >&2
   exit 1
+fi
+
+# Auto-run setup if upgrade-tests pipeline is missing.
+# Maps PRE_UPGRADE vars to standard vars so setup installs the pre-upgrade operator.
+if ! oc get pipeline upgrade-tests -n "$NS" &>/dev/null; then
+  echo "=== Running setup-pipelines-ci.sh (using PRE_UPGRADE vars for initial install) ==="
+  OPERATOR_VERSION="$PRE_UPGRADE_VERSION" \
+  OPERATOR_ENVIRONMENT="${PRE_UPGRADE_OPERATOR_ENVIRONMENT:-prod}" \
+  CATALOG_SOURCE="${PRE_UPGRADE_CATALOG_SOURCE:-redhat-operators}" \
+  KONFLUX_INDEX_IMAGE="${PRE_UPGRADE_KONFLUX_INDEX_IMAGE:-}" \
+  CHANNEL="$(resolve_channel "$PRE_UPGRADE_VERSION" "${PRE_UPGRADE_CHANNEL:-}")" \
+    bash "$SCRIPT_DIR/setup-pipelines-ci.sh" \
+    || die "setup-pipelines-ci.sh failed"
 fi
 FW="$(printf '%s' "${TEST_FRAMEWORK:-gauge}" | tr '[:upper:]' '[:lower:]')"
 SEND_SLACK_NOTIFICATION=$(normalize_bool "$(env_file_get SEND_SLACK_NOTIFICATION "$ENV_FILE")")

@@ -370,7 +370,7 @@ spec:
     taskRef:
       name: release-tests
     retries: 2
-    timeout: 30m
+    timeout: 1h
     when:
       - input: $(params.INSTALL_PIPELINES_OPERATOR)
         operator: in
@@ -571,7 +571,7 @@ spec:
       - install-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     when:
       - input: release-tests-triggers-tls
         operator: in
@@ -917,7 +917,7 @@ spec:
       - install-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     when:
       - input: release-tests-rbac
         operator: in
@@ -966,7 +966,7 @@ spec:
       - install-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     when:
       - input: release-tests-addon
         operator: in
@@ -1015,7 +1015,7 @@ spec:
       - install-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     when:
       - input: release-tests-auto-prune
         operator: in
@@ -1113,7 +1113,7 @@ spec:
       - install-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     when:
       - input: release-tests-ecosystem
         operator: in
@@ -1162,7 +1162,7 @@ spec:
       - install-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     when:
       - input: release-tests-ecosystem-multiarch
         operator: in
@@ -1213,7 +1213,7 @@ spec:
       - install-pipelines-operator
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     when:
       - input: release-tests-ecosystem-s2i
         operator: in

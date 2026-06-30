@@ -43,18 +43,13 @@ if [[ "$EXISTING_PROVIDERS" == "EXISTS" ]]; then
   echo "htpasswd identity provider already configured"
 else
   echo "Adding htpasswd identity provider (preserving existing providers)"
-  oc patch oauth cluster --type=json -p '[{
-    "op": "add",
-    "path": "/spec/identityProviders/-",
-    "value": {
-      "name": "htpasswd",
-      "challenge": true,
-      "login": true,
-      "mappingMethod": "add",
-      "type": "HTPasswd",
-      "htpasswd": {"fileData": {"name": "htpass-secret"}}
-    }
-  }]'
+  HTPASSWD_PROVIDER='{"name":"htpasswd","challenge":true,"login":true,"mappingMethod":"add","type":"HTPasswd","htpasswd":{"fileData":{"name":"htpass-secret"}}}'
+  HAS_ARRAY=$(oc get oauth cluster -o jsonpath='{.spec.identityProviders}' 2>/dev/null)
+  if [[ -z "$HAS_ARRAY" || "$HAS_ARRAY" == "null" ]]; then
+    oc patch oauth cluster --type=merge -p "{\"spec\":{\"identityProviders\":[${HTPASSWD_PROVIDER}]}}"
+  else
+    oc patch oauth cluster --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/identityProviders/-\",\"value\":${HTPASSWD_PROVIDER}}]"
+  fi
 fi
 
 # Set long-lived tokens for CI

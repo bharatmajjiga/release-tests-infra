@@ -91,16 +91,18 @@ create_cluster_secret() {
 }
 
 resolve_channel() {
-  [[ -n "${OPERATOR_VERSION:-}" ]] || die "OPERATOR_VERSION required for operator install"
+  local ver="${OPERATOR_VERSION:-${UPGRADE_VERSION:-${PRE_UPGRADE_VERSION:-}}}"
+  [[ -n "$ver" ]] || die "OPERATOR_VERSION (or UPGRADE_VERSION / PRE_UPGRADE_VERSION) required"
   if [[ -z "${CHANNEL:-}" || "${CHANNEL}" == latest ]]; then
-    CHANNEL="pipelines-${OPERATOR_VERSION%.*}"
+    CHANNEL="pipelines-${ver%.*}"
     export CHANNEL
-    echo "CHANNEL=${CHANNEL} (from OPERATOR_VERSION=${OPERATOR_VERSION})"
+    echo "CHANNEL=${CHANNEL} (from version=${ver})"
   fi
 }
 
 apply_custom_catalog() {
-  local env="${OPERATOR_ENVIRONMENT:-pre-stage}" src="${CATALOG_SOURCE:-redhat-operators}" pod yaml
+  local env="${OPERATOR_ENVIRONMENT:-${UPGRADE_OPERATOR_ENVIRONMENT:-pre-stage}}"
+  local src="${CATALOG_SOURCE:-${UPGRADE_CATALOG_SOURCE:-redhat-operators}}" pod yaml
   [[ "$env" == prod || "$src" == redhat-operators ]] && return 0
   [[ -n "${KONFLUX_INDEX_IMAGE:-}" ]] || die "KONFLUX_INDEX_IMAGE required when OPERATOR_ENVIRONMENT != prod"
 
@@ -141,20 +143,24 @@ install_pipelines_operator() {
   validate_cluster_env || die "cluster env validation failed"
   cluster_login || die "cluster login failed"
 
+  local ver="${OPERATOR_VERSION:-${UPGRADE_VERSION:-${PRE_UPGRADE_VERSION:-}}}"
   local csv phase
   csv=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators \
     -o jsonpath='{.status.currentCSV}' 2>/dev/null || true)
-  if [[ -n "$csv" && "$csv" == *"${OPERATOR_VERSION}"* ]]; then
+  if [[ -n "$csv" && -n "$ver" && "$csv" == *"${ver}"* ]]; then
     phase=$(oc get "csv/${csv}" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || true)
     if [[ "$phase" == Succeeded ]]; then
-      echo "Operator ${OPERATOR_VERSION} already installed (${csv})"
+      echo "Operator ${ver} already installed (${csv})"
       return 0
     fi
   fi
 
-  echo "=== Installing OpenShift Pipelines operator (${OPERATOR_VERSION}, ${CATALOG_SOURCE}/${CHANNEL}) ==="
-  apply_custom_catalog
-  CHANNEL="${CHANNEL}" CATALOG_SOURCE="${CATALOG_SOURCE:-redhat-operators}" \
+  local cat_src="${CATALOG_SOURCE:-${UPGRADE_CATALOG_SOURCE:-redhat-operators}}"
+  local env="${OPERATOR_ENVIRONMENT:-${UPGRADE_OPERATOR_ENVIRONMENT:-pre-stage}}"
+  local idx="${KONFLUX_INDEX_IMAGE:-${UPGRADE_KONFLUX_INDEX_IMAGE:-}}"
+  echo "=== Installing OpenShift Pipelines operator (${ver}, ${cat_src}/${CHANNEL}) ==="
+  CATALOG_SOURCE="$cat_src" OPERATOR_ENVIRONMENT="$env" KONFLUX_INDEX_IMAGE="$idx" apply_custom_catalog
+  CHANNEL="${CHANNEL}" CATALOG_SOURCE="$cat_src" \
     bash "$REPO_ROOT/config/operators/install-pipelines.sh"
 }
 

@@ -52,7 +52,7 @@ spec:
           value: $(params.CLUSTER_LIFETIME)
       taskRef:
         name: provision-cluster
-      timeout: 60m
+      timeout: 1h30m
   finally:
     - name: destroy-on-failure
       params:

@@ -27,6 +27,18 @@ spec:
               key: admin-token
               name: cluster-$(params.CLUSTER_NAME)
               optional: true
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: kubeadmin-password
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: ADMIN_NAME
+          valueFrom:
+            secretKeyRef:
+              key: admin-name
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
         - name: APISERVER
           valueFrom:
             secretKeyRef:
@@ -35,6 +47,13 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
+
+        if [[ -z "${ADMIN_TOKEN:-}" && -n "${ADMIN_PASSWORD:-}" ]]; then
+          ADMIN_TOKEN=$(curl -sk -X POST "${APISERVER}/oauth/authorize?response_type=token&client_id=openshift-challenging-client" \
+            --user "${ADMIN_NAME:-kubeadmin}:${ADMIN_PASSWORD}" -D - 2>/dev/null \
+            | sed -n 's/.*access_token=\([^&]*\).*/\1/p' | head -1) || true
+          [[ -n "$ADMIN_TOKEN" ]] && echo "Obtained API token from kubeadmin credentials"
+        fi
 
         pod_arch() {
           case "$(uname -m)" in aarch64) echo arm64 ;; x86_64) echo amd64 ;; *) uname -m ;; esac

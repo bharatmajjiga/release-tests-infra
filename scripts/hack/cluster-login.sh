@@ -7,24 +7,16 @@ cluster_platforms() {
 validate_cluster_env() {
   [[ -n "${APISERVER:-}" ]] || { echo "ERROR: APISERVER required in .env" >&2; return 1; }
 
-  if cluster_platforms; then
-    [[ -n "${OC_TOKEN:-}" ]] || {
-      echo "ERROR: INSTALLER=cluster-platforms requires OC_TOKEN in .env" >&2
-      return 1
-    }
-    [[ -n "${CLUSTER_CA_CERT:-}" ]] || {
-      echo "ERROR: INSTALLER=cluster-platforms requires CLUSTER_CA_CERT in .env" >&2
-      return 1
-    }
+  [[ -n "${KUBEADMIN_PASSWORD:-}" || -n "${OC_TOKEN:-}" ]] || {
+    echo "ERROR: KUBEADMIN_PASSWORD or OC_TOKEN required in .env" >&2
+    return 1
+  }
+
+  if cluster_platforms && [[ -n "${OC_TOKEN:-}" && -n "${CLUSTER_CA_CERT:-}" ]]; then
     local ca="${CLUSTER_CA_CERT}" root="${REPO_ROOT:-.}"
     [[ "$ca" != /* ]] && ca="${root}/${ca}"
     [[ -f "$ca" ]] || {
       echo "ERROR: CLUSTER_CA_CERT file not found: $ca" >&2
-      return 1
-    }
-  else
-    [[ -n "${KUBEADMIN_PASSWORD:-}" ]] || {
-      echo "ERROR: INSTALLER=${INSTALLER:-none} requires KUBEADMIN_PASSWORD in .env" >&2
       return 1
     }
   fi
@@ -41,17 +33,20 @@ cluster_ca_path() {
 cluster_login() {
   validate_cluster_env || return 1
 
-  if cluster_platforms; then
-    local ca
-    ca=$(cluster_ca_path) || return 1
-    echo "Logging in to ${APISERVER} with OC_TOKEN (INSTALLER=cluster-platforms)..."
-    oc login --server="${APISERVER}" --token="${OC_TOKEN}" --certificate-authority="${ca}"
-    echo "  Authenticated as $(oc whoami)"
-  else
+  if [[ -n "${KUBEADMIN_PASSWORD:-}" ]]; then
     echo "Logging in to ${APISERVER} as ${KUBEADMIN_USER:-kubeadmin}..."
     oc login -u "${KUBEADMIN_USER:-kubeadmin}" -p "$KUBEADMIN_PASSWORD" \
       "$APISERVER" --insecure-skip-tls-verify=true
+  elif [[ -n "${OC_TOKEN:-}" ]]; then
+    local ca_flag="--insecure-skip-tls-verify=true"
+    local ca
+    if ca=$(cluster_ca_path 2>/dev/null); then
+      ca_flag="--certificate-authority=${ca}"
+    fi
+    echo "Logging in to ${APISERVER} with OC_TOKEN..."
+    oc login --server="${APISERVER}" --token="${OC_TOKEN}" ${ca_flag}
   fi
+  echo "  Authenticated as $(oc whoami)"
 }
 
 cluster_admin_name() {
@@ -64,7 +59,7 @@ cluster_admin_name() {
 
 cluster_admin_token() {
   validate_cluster_env || return 1
-  if cluster_platforms; then
+  if [[ -n "${OC_TOKEN:-}" ]]; then
     printf '%s' "$OC_TOKEN"
   else
     oc whoami -t
