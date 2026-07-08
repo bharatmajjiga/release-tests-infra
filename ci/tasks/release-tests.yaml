@@ -197,16 +197,28 @@ spec:
             echo "$url" | sed -E \
               "s|/content-gateway/rest/browse/pub/cgw/pipelines/([^/]+)/?.*|/content-gateway/file/pub/cgw/pipelines/\1/tkn-linux-${CLI_ARCH}.tar.gz|" \
               | sed -E "s/tkn-linux-[a-z0-9]+\.tar\.gz/tkn-linux-${CLI_ARCH}.tar.gz/"
-          else
-            local cluster_url=""
-            cluster_url=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+            return
+          fi
+
+          local cluster_url=""
+          if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+            cluster_url=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN}" \
               "${APISERVER}/apis/console.openshift.io/v1/consoleclidownloads/tkn" 2>/dev/null \
-              | sed -n "s|.*\"href\":[[:space:]]*\"\\([^\"]*tkn-linux-${CLI_ARCH}\\.tar\\.gz\\)\".*|\\1|p" | head -1) || true
-            if [[ -n "$cluster_url" ]]; then
-              echo "$cluster_url"
-            else
-              echo "https://developers.redhat.com/content-gateway/file/pub/cgw/pipelines/${OSP_VER}/tkn-linux-${CLI_ARCH}.tar.gz"
-            fi
+              | grep -o "https://[^\"]*tkn-linux-${CLI_ARCH}\\.tar\\.gz" | head -1) || true
+          fi
+          if [[ -z "$cluster_url" && -n "${ADMIN_TOKEN:-}" ]]; then
+            local tkn_host
+            tkn_host=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+              "${APISERVER}/apis/route.openshift.io/v1/namespaces/openshift-pipelines/routes/tkn-cli-serve" 2>/dev/null \
+              | grep -o '"host":"[^"]*"' | head -1 | cut -d'"' -f4) || true
+            [[ -n "$tkn_host" ]] && cluster_url="https://${tkn_host}/tkn/tkn-linux-${CLI_ARCH}.tar.gz"
+          fi
+
+          if [[ -n "$cluster_url" ]]; then
+            echo "$cluster_url"
+          else
+            echo "ERROR: Cannot resolve tkn download URL from cluster — set TKN_DOWNLOAD_URL in .env" >&2
+            return 1
           fi
         }
 
@@ -239,15 +251,21 @@ spec:
         }
 
         install_tkn() {
-          local url archive tmp jar
+          local url archive tmp jar tags="$(params.TAGS)"
           url=$(resolve_tkn_url "$(params.TKN_DOWNLOAD_URL)")
           archive="/tmp/tkn-linux-${CLI_ARCH}.tar.gz"
+          # Force fresh download after operator upgrade to get the new version
+          if [[ "$tags" == "upgrade" || "$tags" == "post-upgrade" ]]; then
+            rm -f "$archive"
+          fi
           if [[ ! -s "$archive" ]]; then
             echo "Downloading tkn/opc from ${url}..."
             tmp="${archive}.part.$$"; jar=$(mktemp)
             curl -kfsSL -c "$jar" -b "$jar" "$url" -o "$tmp" && rm -f "$jar" && mv "$tmp" "$archive"
           fi
           tar xzf "$archive" -C "$TOOLS_BIN" --strip-components=1
+          echo "  tkn version: $(${TOOLS_BIN}/tkn version 2>/dev/null | head -1 || echo unknown)"
+          echo "  opc version: $(${TOOLS_BIN}/opc version 2>/dev/null | head -1 || echo unknown)"
         }
 
         ensure_gauge() {
@@ -268,8 +286,17 @@ spec:
         }
 
         ensure_toolchain() {
+          local tags="$(params.TAGS)"
           [[ -x "${CACHED_TOOLS_BIN:-}/oc" || -x "$TOOLS_BIN/oc" ]] || install_oc
-          [[ (-x "${CACHED_TOOLS_BIN:-}/tkn" && -x "${CACHED_TOOLS_BIN:-}/opc") || (-x "$TOOLS_BIN/tkn" && -x "$TOOLS_BIN/opc") ]] || install_tkn
+
+          # After operator upgrade, re-download tkn/opc to pick up the new version
+          if [[ "$tags" == "upgrade" || "$tags" == "post-upgrade" ]]; then
+            echo "Upgrade flow — downloading tkn/opc from upgraded cluster"
+            install_tkn
+          else
+            [[ (-x "${CACHED_TOOLS_BIN:-}/tkn" && -x "${CACHED_TOOLS_BIN:-}/opc") || (-x "$TOOLS_BIN/tkn" && -x "$TOOLS_BIN/opc") ]] || install_tkn
+          fi
+
           case "$FRAMEWORK" in
             gauge)  ensure_gauge ;;
             ginkgo) ensure_ginkgo ;;

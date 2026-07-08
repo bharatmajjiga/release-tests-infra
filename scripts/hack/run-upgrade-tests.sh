@@ -136,11 +136,20 @@ OPERATOR_ENVIRONMENT="${UPGRADE_OPERATOR_ENVIRONMENT:-pre-stage}" \
   validate_operator_env || missing+=("UPGRADE env/catalog mismatch (see error above)")
 
 FW="$(printf '%s' "${TEST_FRAMEWORK:-gauge}" | tr '[:upper:]' '[:lower:]')"
+# Auto-resolve git branches from ci-config.yaml using UPGRADE_VERSION
+ver_short="${UPGRADE_VERSION%.*}"
+if [[ "$FW" == gauge && -z "${GIT_RELEASE_TESTS_BRANCH:-}" ]]; then
+  GIT_RELEASE_TESTS_BRANCH=$(ci_config_get "$ver_short" release-tests.revision) || true
+fi
+if [[ "$FW" == ginkgo && -z "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]]; then
+  GIT_RELEASE_TESTS_GINKGO_BRANCH=$(ci_config_get "$ver_short" release-tests-ginkgo.revision) || true
+fi
+
 case "$FW" in
   gauge)
-    [[ -n "${GIT_RELEASE_TESTS_BRANCH:-}" ]] || missing+=("GIT_RELEASE_TESTS_BRANCH (required for gauge)") ;;
+    [[ -n "${GIT_RELEASE_TESTS_BRANCH:-}" ]] || missing+=("GIT_RELEASE_TESTS_BRANCH (set in .env or add to ci-config.yaml)") ;;
   ginkgo)
-    [[ -n "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]] || missing+=("GIT_RELEASE_TESTS_GINKGO_BRANCH (required for ginkgo)") ;;
+    [[ -n "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]] || missing+=("GIT_RELEASE_TESTS_GINKGO_BRANCH (set in .env or add to ci-config.yaml)") ;;
   *) missing+=("TEST_FRAMEWORK must be gauge or ginkgo (got: $FW)") ;;
 esac
 
@@ -148,6 +157,36 @@ if ((${#missing[@]})); then
   echo "ERROR: Missing required configuration:" >&2
   printf '  - %s\n' "${missing[@]}" >&2
   exit 1
+fi
+
+# Auto-create secrets if test secrets are missing
+if ! oc get secret github -n "$NS" &>/dev/null; then
+  echo "=== Running create-secrets.sh (test secrets missing) ==="
+  bash "$SCRIPT_DIR/create-secrets.sh" || die "create-secrets.sh failed"
+fi
+
+# Install Logging + Loki operator if requested
+is_enabled() {
+  case "$(printf '%s' "${1:-false}" | tr '[:upper:]' '[:lower:]')" in
+    true|yes|1|on) return 0 ;; *) return 1 ;; esac
+}
+if is_enabled "${INSTALL_LOGGING_OPERATOR:-false}"; then
+  if ! oc get pods -n openshift-logging -l name=cluster-logging-operator --no-headers 2>/dev/null | grep -q Running; then
+    echo "=== Installing Logging + Loki operator ==="
+    bash "$REPO_ROOT/config/operators/install-logging.sh" || echo "WARNING: Logging operator install failed (non-fatal)"
+  else
+    echo "Logging operator already installed"
+  fi
+fi
+
+# Install Serverless operator if requested
+if is_enabled "${INSTALL_SERVERLESS_OPERATOR:-false}"; then
+  if ! oc get csv -n openshift-serverless --no-headers 2>/dev/null | grep -q Succeeded; then
+    echo "=== Installing Serverless operator ==="
+    bash "$REPO_ROOT/config/operators/install-serverless.sh" || echo "WARNING: Serverless operator install failed (non-fatal)"
+  else
+    echo "Serverless operator already installed"
+  fi
 fi
 
 # Auto-run setup if upgrade-tests pipeline is missing.

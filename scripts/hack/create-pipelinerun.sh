@@ -255,6 +255,13 @@ preflight() {
     cluster_secret_exists "$NS" \
       || die "secret $(cluster_secret_name) missing in $NS (run ./scripts/hack/setup-pipelines-ci.sh)"
   fi
+
+  # Auto-create test secrets if missing
+  if ! oc get secret github -n "$NS" &>/dev/null; then
+    echo "    test secrets missing — running create-secrets.sh"
+    bash "$SCRIPT_DIR/create-secrets.sh" || die "create-secrets.sh failed"
+  fi
+
   oc get pipeline acceptance-tests -n "$NS" &>/dev/null \
     || die "pipeline acceptance-tests missing in $NS (run ./scripts/hack/setup-pipelines-ci.sh)"
 

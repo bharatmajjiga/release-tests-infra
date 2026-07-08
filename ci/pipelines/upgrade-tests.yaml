@@ -236,7 +236,7 @@ spec:
 
   - name: go-mod-cache-gauge
     params:
-      - name: OPERATOR_VERSION
+      - name: OSP_VERSION
         value: $(params.PRE_UPGRADE_VERSION)
       - name: CLUSTER_NAME
         value: $(tasks.provision-cluster.results.cluster-name)
@@ -268,7 +268,7 @@ spec:
 
   - name: go-mod-cache-ginkgo
     params:
-      - name: OPERATOR_VERSION
+      - name: OSP_VERSION
         value: $(params.PRE_UPGRADE_VERSION)
       - name: CLUSTER_NAME
         value: $(tasks.provision-cluster.results.cluster-name)

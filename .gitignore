@@ -2,3 +2,5 @@
 .env
 
 .cursor/
+.clusters/
+.pull-secret.json

@@ -48,46 +48,15 @@ ensure_namespace() {
   oc project "$NAMESPACE" >/dev/null
 }
 
-create_cluster_secret() {
+ensure_cluster_secret() {
   [[ -n "${CLUSTER_NAME:-}" ]] || die "CLUSTER_NAME required in .env"
-  [[ -n "${APISERVER:-}" ]] || die "APISERVER required in .env"
-  local secret existing args installer
+  local secret
   secret="$(cluster_secret_name)" || die "CLUSTER_NAME required in .env"
-
-  echo "Checking for secret ${secret} in ${NAMESPACE}..."
-  if cluster_secret_exists "$NAMESPACE"; then
-    existing="$(secret_installer "$secret" "$NAMESPACE")"
-    if ! cluster_platforms && [[ "$existing" == cluster-platforms ]]; then
-      echo "Secret ${secret} has installer=cluster-platforms; .env INSTALLER=${INSTALLER:-none} — skipping"
-      return 0
-    fi
-    [[ "$FORCE" == true ]] || { echo "Secret ${secret} already exists in ${NAMESPACE} (use --force to recreate)"; return 0; }
-    echo "Deleting secret ${secret}..."
-    oc delete secret "$secret" -n "$NAMESPACE"
+  if ! cluster_secret_exists "$NAMESPACE"; then
+    echo "Cluster secret ${secret} missing — run ./scripts/hack/create-secrets.sh first"
+    bash "$SCRIPT_DIR/create-secrets.sh" || die "create-secrets.sh failed"
   fi
-
-  validate_cluster_env || die "cluster env validation failed"
-  echo "=== Verifying cluster login ==="
-  cluster_login || die "cluster login failed"
-
-  installer=$(cluster_installer)
-  echo "=== Creating secret ${secret} (installer=${installer}) ==="
-
-  args=(
-    --from-literal=admin-name="$(cluster_admin_name)"
-    --from-literal=api-url="${APISERVER}"
-    --from-literal=admin-token="$(cluster_admin_token)"
-    --from-literal=kubeadmin-password="${KUBEADMIN_PASSWORD:-}"
-    --from-literal=user-password="${USER_PASSWORD:-user}"
-    --from-literal=insecure-skip-tls-verify="$(cluster_insecure_tls)"
-    --from-literal=installer="${installer}"
-    --from-literal=mirror-reg=quay.io
-  )
-  cluster_platforms && args+=(--from-file=cluster-ca-cert="$(cluster_ca_path)")
-
-  oc create secret generic "$secret" "${args[@]}" -n "$NAMESPACE"
-  oc label secret "$secret" keep-cluster=true -n "$NAMESPACE" --overwrite
-  echo "Created secret ${secret}"
+  echo "Cluster secret ${secret} ready"
 }
 
 resolve_channel() {
@@ -209,31 +178,7 @@ case "$MODE" in
 esac
 
 ensure_namespace
-create_cluster_secret
-
-# Add Quay credentials to global pull-secret for stage/pre-stage index images
-if [[ -n "${QUAY_USER:-}" && -n "${QUAY_PASS:-}" ]]; then
-  echo "=== Updating global pull-secret with Quay credentials ==="
-  _tmpps=$(mktemp)
-  oc get secret pull-secret -n openshift-config -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null \
-    | base64 -d > "$_tmpps"
-  if [[ -s "$_tmpps" ]]; then
-    export QUAY_B64=$(echo -n "${QUAY_USER}:${QUAY_PASS}" | base64)
-    python3 -c "
-import json, os
-with open('$_tmpps') as f:
-    d = json.load(f)
-d['auths']['quay.io'] = {'auth': os.environ['QUAY_B64']}
-with open('$_tmpps', 'w') as f:
-    json.dump(d, f)
-" && \
-    oc set data secret/pull-secret -n openshift-config --from-literal=".dockerconfigjson=$(cat "$_tmpps")" && \
-    echo "  quay.io auth added (${QUAY_USER})" || \
-    echo "  WARNING: failed to update global pull-secret"
-    unset QUAY_B64
-  fi
-  rm -f "$_tmpps"
-fi
+ensure_cluster_secret
 
 install_pipelines_operator
 verify_pipelines_install

@@ -264,6 +264,83 @@ if [[ "$(printf '%s' "${INSTALLER:-none}" | tr '[:upper:]' '[:lower:]')" == aro 
   fi
 fi
 
+# --- Cluster connection secret ---
+source "$SCRIPT_DIR/cluster-login.sh"
+if [[ -n "${CLUSTER_NAME:-}" && -n "${APISERVER:-}" ]]; then
+  _secret="cluster-${CLUSTER_NAME#cluster-}"
+  if oc get secret "$_secret" -n "$NAMESPACE" &>/dev/null; then
+    echo "Cluster secret ${_secret} already exists"
+  else
+    validate_cluster_env || die "cluster env validation failed"
+    cluster_login || die "cluster login failed"
+    _args=(
+      --from-literal=admin-name="$(cluster_admin_name)"
+      --from-literal=api-url="${APISERVER}"
+      --from-literal=admin-token="$(cluster_admin_token)"
+      --from-literal=kubeadmin-password="${KUBEADMIN_PASSWORD:-}"
+      --from-literal=user-password="${USER_PASSWORD:-user}"
+      --from-literal=insecure-skip-tls-verify="$(cluster_insecure_tls)"
+      --from-literal=installer="$(cluster_installer)"
+      --from-literal=mirror-reg=quay.io
+    )
+    _ca=""
+    if _ca=$(cluster_ca_path 2>/dev/null); then
+      _args+=(--from-file=cluster-ca-cert="$_ca")
+    fi
+    oc create secret generic "$_secret" "${_args[@]}" -n "$NAMESPACE"
+    oc label secret "$_secret" keep-cluster=true -n "$NAMESPACE" --overwrite
+    echo "Created cluster secret ${_secret}"
+    CREATED=$((CREATED + 1))
+  fi
+fi
+
+# --- Global pull-secret update (stage/pre-stage registries) ---
+_env="${OPERATOR_ENVIRONMENT:-${UPGRADE_OPERATOR_ENVIRONMENT:-${PRE_UPGRADE_OPERATOR_ENVIRONMENT:-prod}}}"
+if [[ "$_env" == stage || "$_env" == pre-stage ]]; then
+  _tmpps=$(mktemp)
+  oc get secret pull-secret -n openshift-config -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null \
+    | base64 -d > "$_tmpps" 2>/dev/null || true
+  if [[ -s "$_tmpps" ]]; then
+    _q_user="${QUAY_USER:-}" _q_pass="${QUAY_PASS:-}"
+    _b_user="${BREW_USER:-}" _b_pass="${BREW_PASS:-}"
+    _s_user="${STAGE_REGISTRY_USER:-${SUBSCRIPTION_USERNAME:-}}"
+    _s_pass="${STAGE_REGISTRY_PASS:-${SUBSCRIPTION_PASSWORD:-}}"
+
+    _result=$(_QU="$_q_user" _QP="$_q_pass" _BU="$_b_user" _BP="$_b_pass" \
+      _SU="$_s_user" _SP="$_s_pass" \
+      python3 - "$_tmpps" << 'PYEOF'
+import json, os, base64, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+auths = d.setdefault('auths', {})
+changed = False
+def add_if_missing(reg, u, p):
+    global changed
+    if not u or not p: return
+    if reg in auths: return
+    a = base64.b64encode(f'{u}:{p}'.encode()).decode()
+    auths[reg] = {'auth': a}
+    changed = True
+    print(f'  {reg}: configured')
+add_if_missing('brew.registry.redhat.io', os.environ.get('_BU',''), os.environ.get('_BP',''))
+add_if_missing('registry.stage.redhat.io', os.environ.get('_SU',''), os.environ.get('_SP',''))
+if changed:
+    with open(sys.argv[1], 'w') as f: json.dump(d, f)
+    print('UPDATED')
+else:
+    print('NO_CHANGE')
+PYEOF
+    )
+    echo "$_result" | grep -v "UPDATED\|NO_CHANGE" || true
+    if echo "$_result" | grep -q UPDATED; then
+      oc set data secret/pull-secret -n openshift-config --from-file=".dockerconfigjson=$_tmpps" >/dev/null 2>&1 \
+        && echo "  global pull-secret updated" \
+        || echo "  WARNING: failed to update global pull-secret"
+    fi
+  fi
+  rm -f "$_tmpps"
+fi
+
 [[ "$CREATED" -eq 0 ]] \
   && echo "No secrets created. Set CRED_SOURCE=local with secret vars in .env, or CRED_SOURCE=vault." \
   || echo "Created/updated $CREATED secret(s) in $NAMESPACE"
