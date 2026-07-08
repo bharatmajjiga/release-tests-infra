@@ -307,13 +307,14 @@ if [[ "$_env" == stage || "$_env" == pre-stage ]]; then
     _s_pass="${STAGE_REGISTRY_PASS:-${SUBSCRIPTION_PASSWORD:-}}"
 
     _result=$(_QU="$_q_user" _QP="$_q_pass" _BU="$_b_user" _BP="$_b_pass" \
-      _SU="$_s_user" _SP="$_s_pass" \
+      _SU="$_s_user" _SP="$_s_pass" _INST="${INSTALLER:-none}" \
       python3 - "$_tmpps" << 'PYEOF'
 import json, os, base64, sys
 with open(sys.argv[1]) as f:
     d = json.load(f)
 auths = d.setdefault('auths', {})
 changed = False
+installer = os.environ.get('_INST', 'none').lower()
 def add_if_missing(reg, u, p):
     global changed
     if not u or not p: return
@@ -322,8 +323,17 @@ def add_if_missing(reg, u, p):
     auths[reg] = {'auth': a}
     changed = True
     print(f'  {reg}: configured')
-add_if_missing('brew.registry.redhat.io', os.environ.get('_BU',''), os.environ.get('_BP',''))
-add_if_missing('registry.stage.redhat.io', os.environ.get('_SU',''), os.environ.get('_SP',''))
+def ensure_auth(reg, u, p):
+    global changed
+    if not u or not p: return
+    a = base64.b64encode(f'{u}:{p}'.encode()).decode()
+    if auths.get(reg, {}).get('auth') == a: return
+    auths[reg] = {'auth': a}
+    changed = True
+    print(f'  {reg}: configured')
+fn = add_if_missing if installer == 'cluster-bot' else ensure_auth
+fn('brew.registry.redhat.io', os.environ.get('_BU',''), os.environ.get('_BP',''))
+fn('registry.stage.redhat.io', os.environ.get('_SU',''), os.environ.get('_SP',''))
 if changed:
     with open(sys.argv[1], 'w') as f: json.dump(d, f)
     print('UPDATED')
