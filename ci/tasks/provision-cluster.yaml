@@ -219,7 +219,7 @@ spec:
     # ============================================================
     - name: aro
       onError: continue
-      image: mcr.microsoft.com/azure-cli:latest
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
       workingDir: /mnt
       env:
         - name: AZURE_TENANT
@@ -254,6 +254,12 @@ spec:
         if [[ "${INSTALLER,,}" != "aro" ]]; then
           echo "INSTALLER=${INSTALLER} — not aro, skipping"
           exit 0
+        fi
+
+        # Install Azure CLI (only runs when INSTALLER=aro)
+        if ! command -v az &>/dev/null; then
+          echo "Installing Azure CLI..."
+          pip3 install --no-cache-dir azure-cli 2>&1 | tail -1
         fi
 
         CLUSTER_PREFIX="$(params.CLUSTER_NAME)"
