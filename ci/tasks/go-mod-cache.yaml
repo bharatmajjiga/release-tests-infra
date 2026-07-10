@@ -177,13 +177,15 @@ spec:
 
         populate_cache() {
           local repo=$1 key=$2 fw=$3 lock="${GOMODCACHE_ROOT}/.lock"
+          local arch
+          arch=$(pod_arch)
           local gomod="${GOMODCACHE_ROOT}/${key}/gomod"
-          local tools="${GOMODCACHE_ROOT}/${key}/tools/bin"
-          local gobuild="${GOMODCACHE_ROOT}/${key}/gobuild"
+          local tools="${GOMODCACHE_ROOT}/${key}/tools-${arch}/bin"
+          local gobuild="${GOMODCACHE_ROOT}/${key}/gobuild-${arch}"
           mkdir -p "$gomod" "$tools" "$gobuild"
 
           # Redirect all Go caches to the workspace PVC (avoids /opt/app-root permission issues)
-          export GOMODCACHE="$gomod" GOCACHE="$gobuild" GOPATH="${GOMODCACHE_ROOT}/${key}/gopath"
+          export GOMODCACHE="$gomod" GOCACHE="$gobuild" GOPATH="${GOMODCACHE_ROOT}/${key}/gopath-${arch}"
           mkdir -p "$GOPATH"
 
           (
@@ -227,7 +229,7 @@ spec:
                     GOBIN="$tools" go install github.com/getgauge/gauge@v1.6.25
                   fi
                 fi
-                local gauge_home="${GOMODCACHE_ROOT}/${key}/gauge-home"
+                local gauge_home="${GOMODCACHE_ROOT}/${key}/gauge-home-${arch}"
                 if [[ ! -f "${gauge_home}/.ready" ]]; then
                   mkdir -p "$gauge_home/config"
                   touch "$gauge_home/config/gauge.properties"

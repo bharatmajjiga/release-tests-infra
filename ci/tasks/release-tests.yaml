@@ -319,8 +319,8 @@ spec:
 
           cache_id=$(tr -d '[:space:]' < "$key_file")
           key="${GOMODCACHE_ROOT}/${cache_id}/gomod"
-          tools="${GOMODCACHE_ROOT}/${cache_id}/tools/bin"
-          gauge_home="${GOMODCACHE_ROOT}/${cache_id}/gauge-home"
+          tools="${GOMODCACHE_ROOT}/${cache_id}/tools-${CLI_ARCH}/bin"
+          gauge_home="${GOMODCACHE_ROOT}/${cache_id}/gauge-home-${CLI_ARCH}"
 
           [[ -f "${tools}/.ready" ]] \
             || { echo "ERROR: tools cache not ready at ${tools}"; exit 1; }
@@ -346,8 +346,8 @@ spec:
           TOOLS_BIN="$(mktemp -d)/bin"
           local cache_id
           cache_id=$(tr -d '[:space:]' < "${GOMODCACHE_ROOT}/.${FRAMEWORK}.cache-key" 2>/dev/null) || true
-          if [[ -n "$cache_id" && -d "${GOMODCACHE_ROOT}/${cache_id}/gobuild" ]]; then
-            GOCACHE="${GOMODCACHE_ROOT}/${cache_id}/gobuild"
+          if [[ -n "$cache_id" && -d "${GOMODCACHE_ROOT}/${cache_id}/gobuild-${CLI_ARCH}" ]]; then
+            GOCACHE="${GOMODCACHE_ROOT}/${cache_id}/gobuild-${CLI_ARCH}"
           else
             GOCACHE="$(mktemp -d)"
           fi
