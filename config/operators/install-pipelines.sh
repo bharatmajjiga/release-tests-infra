@@ -22,12 +22,36 @@ wait_csv_succeeded() {
   return 1
 }
 
+# Check if operator is already installed and healthy
+existing_csv=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators \
+  -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)
+existing_state=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators \
+  -o jsonpath='{.status.state}' 2>/dev/null || true)
+
+if [[ -n "$existing_csv" && "$existing_state" == AtLatestKnown ]]; then
+  phase=$(oc get "csv/${existing_csv}" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || true)
+  if [[ "$phase" == Succeeded ]]; then
+    echo "Operator ${existing_csv} already installed and healthy (${CATALOG_SOURCE}/${CHANNEL})"
+    # Ensure subscription points to correct source/channel
+    oc patch subscription openshift-pipelines-operator-rh -n openshift-operators --type merge \
+      -p "{\"spec\":{\"channel\":\"${CHANNEL}\",\"source\":\"${CATALOG_SOURCE}\",\"sourceNamespace\":\"openshift-marketplace\"}}" 2>/dev/null || true
+    exit 0
+  fi
+fi
+
 echo "Ensure pipelines subscription exists"
 if oc get subscription openshift-pipelines-operator-rh -n openshift-operators &>/dev/null; then
-  oc patch subscription openshift-pipelines-operator-rh -n openshift-operators --type merge \
-    -p "{\"spec\":{\"channel\":\"${CHANNEL}\",\"source\":\"${CATALOG_SOURCE}\",\"sourceNamespace\":\"openshift-marketplace\"}}"
-else
-  cat <<EOF | oc apply -f -
+  # Delete subscription + CSV for clean reinstall
+  echo "Removing existing subscription for clean install..."
+  oc delete subscription openshift-pipelines-operator-rh -n openshift-operators --wait=false 2>/dev/null || true
+  if [[ -n "$existing_csv" ]]; then
+    oc delete csv "$existing_csv" -n openshift-operators --wait=false 2>/dev/null || true
+  fi
+  oc delete installplan -n openshift-operators --all 2>/dev/null || true
+  sleep 10
+fi
+
+cat <<EOF | oc apply -f -
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
@@ -35,39 +59,36 @@ metadata:
   namespace: openshift-operators
 spec:
   channel: ${CHANNEL}
-  config:
-    nodeSelector:
-      node-role.kubernetes.io/master: ''
-    tolerations:
-      - effect: NoSchedule
-        key: node-role.kubernetes.io/master
-        operator: Exists
   installPlanApproval: Manual
   name: openshift-pipelines-operator-rh
   source: ${CATALOG_SOURCE}
   sourceNamespace: openshift-marketplace
 EOF
-fi
 
 echo "Waiting for InstallPlan..."
-if ! oc wait subscription/openshift-pipelines-operator-rh -n openshift-operators \
-  --for=condition=InstallPlanPending --timeout=2m 2>/dev/null; then
-  csv=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators -o jsonpath='{.status.currentCSV}')
-  if [[ -n "$csv" ]] && wait_csv_succeeded "$csv" openshift-operators 2m; then
-    echo "Operator ${csv} already installed"
-    exit 0
+deadline=$((SECONDS + 300))
+installplan=""
+while (( SECONDS < deadline )); do
+  installplan=$(oc get installplan -n openshift-operators \
+    -o jsonpath='{.items[?(@.spec.approved==false)].metadata.name}' 2>/dev/null || true)
+  [[ -n "$installplan" ]] && break
+  # Also check if already approved/installed
+  csv=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators \
+    -o jsonpath='{.status.currentCSV}' 2>/dev/null || true)
+  if [[ -n "$csv" ]]; then
+    phase=$(oc get "csv/${csv}" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    if [[ "$phase" == Succeeded ]]; then
+      echo "Operator ${csv} already installed"
+      exit 0
+    fi
   fi
-  echo "ERROR: InstallPlan not pending and operator not installed" >&2
-  exit 1
-fi
-installplan=$(oc get -n openshift-operators installplan \
-  -l operators.coreos.com/openshift-pipelines-operator-rh.openshift-operators \
-  -o name | head -1)
-[[ -n "$installplan" ]] || { echo "ERROR: InstallPlan not found" >&2; exit 1; }
+  echo "  waiting for InstallPlan..."
+  sleep 10
+done
 
-if [[ "$(oc get "$installplan" -n openshift-operators -o jsonpath='{.spec.approved}')" != true ]]; then
-  echo "Approving ${installplan}"
-  oc patch "$installplan" -n openshift-operators --type merge -p '{"spec":{"approved":true}}'
+if [[ -n "$installplan" ]]; then
+  echo "Approving installplan.operators.coreos.com/${installplan}"
+  oc patch "installplan/${installplan}" -n openshift-operators --type merge -p '{"spec":{"approved":true}}'
 fi
 
 echo "Waiting for operator CSV..."
