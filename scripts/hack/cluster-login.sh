@@ -50,11 +50,7 @@ cluster_login() {
 }
 
 cluster_admin_name() {
-  if cluster_platforms; then
-    oc whoami 2>/dev/null || echo "cluster-admin"
-  else
-    echo "${KUBEADMIN_USER:-kubeadmin}"
-  fi
+  echo "${KUBEADMIN_USER:-kubeadmin}"
 }
 
 cluster_admin_token() {
