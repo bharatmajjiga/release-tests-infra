@@ -235,7 +235,19 @@ spec:
                   touch "$gauge_home/config/gauge.properties"
                   export GAUGE_HOME="$gauge_home" PATH="${tools}:${PATH}"
                   gauge config check_updates false
-                  gauge install go 2>&1 || true
+                  # gauge-go plugin: prebuilt for amd64/arm64, build from source for ppc64le/s390x
+                  if [[ "$arch" == amd64 || "$arch" == arm64 ]]; then
+                    gauge install go 2>&1 || true
+                  else
+                    echo "Building gauge-go plugin from source for ${arch}..."
+                    local go_plugin_dir="${gauge_home}/plugins/go/0.5.2"
+                    mkdir -p "$go_plugin_dir/bin"
+                    git clone --depth 1 --branch v0.5.2 https://github.com/getgauge-contrib/gauge-go.git /tmp/gauge-go 2>/dev/null
+                    (cd /tmp/gauge-go && go build -o "$go_plugin_dir/bin/gauge-go" ./.) 2>&1
+                    cp /tmp/gauge-go/go.json "$go_plugin_dir/" 2>/dev/null || true
+                    rm -rf /tmp/gauge-go
+                    echo "gauge-go plugin built for ${arch}"
+                  fi
                   gauge install html-report && gauge install xml-report -v 0.5.3
                   gauge config runner_connection_timeout 3600000
                   gauge config runner_request_timeout 3600000
