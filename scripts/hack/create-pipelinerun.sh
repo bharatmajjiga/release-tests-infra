@@ -310,3 +310,8 @@ echo "    slack notification: ${SEND_SLACK_NOTIFICATION}"
 echo "    suites: ${TEST_SUITE_ITEMS[*]}"
 
 write_pipelinerun
+
+# Configure Tekton MCP server for AI agents (Cursor / Claude Code)
+if [[ -x "$SCRIPT_DIR/configure-mcp.sh" ]]; then
+  "$SCRIPT_DIR/configure-mcp.sh" 2>/dev/null || true
+fi

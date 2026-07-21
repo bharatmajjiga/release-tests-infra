@@ -1,6 +1,7 @@
 # Local environment (secrets, cluster credentials)
 .env
+.env.*
 
-.cursor/
+.claude/settings.json
 .clusters/
 .pull-secret.json

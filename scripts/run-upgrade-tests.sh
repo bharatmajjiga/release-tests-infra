@@ -3,7 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+HACK_DIR="${SCRIPT_DIR}/hack"
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -78,7 +79,7 @@ resolve_channel() {
 set -a; source "$ENV_FILE"; set +a
 
 # shellcheck source=cluster-login.sh
-source "$SCRIPT_DIR/cluster-login.sh"
+source "$HACK_DIR/cluster-login.sh"
 
 command -v oc >/dev/null || die "oc CLI required"
 NS="${NAMESPACE:-pipelines-ci}"
@@ -88,7 +89,7 @@ INSTALLER="${INSTALLER:-aws-ipi}"
 case "${INSTALLER,,}" in
   cluster-platforms|cp)
     # shellcheck source=cluster-login.sh
-    source "$SCRIPT_DIR/cluster-login.sh"
+    source "$HACK_DIR/cluster-login.sh"
     cluster_login || die "cluster login failed"
     if [[ -z "${OPENSHIFT_VERSION:-}" || "${OPENSHIFT_VERSION}" == stable* ]]; then
       OPENSHIFT_VERSION=$(oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null || true)
@@ -117,7 +118,7 @@ case "${INSTALLER,,}" in
     oc get secret azure-creds -n "$NS" &>/dev/null \
       || missing+=("azure-creds secret (run ./scripts/hack/create-secrets.sh with INSTALLER=aro)")
     ;;
-  cluster-platforms|cp)
+  none|cluster-platforms|cp)
     cluster_secret_exists "$NS" \
       || missing+=("cluster secret $(cluster_secret_name) (run ./scripts/hack/setup-pipelines-ci.sh)")
     ;;
@@ -162,7 +163,7 @@ fi
 # Auto-create secrets if test secrets are missing
 if ! oc get secret github -n "$NS" &>/dev/null; then
   echo "=== Running create-secrets.sh (test secrets missing) ==="
-  bash "$SCRIPT_DIR/create-secrets.sh" || die "create-secrets.sh failed"
+  bash "$HACK_DIR/create-secrets.sh" || die "create-secrets.sh failed"
 fi
 
 # Install Logging + Loki operator if requested
@@ -198,7 +199,7 @@ if ! oc get pipeline upgrade-tests -n "$NS" &>/dev/null; then
   CATALOG_SOURCE="${PRE_UPGRADE_CATALOG_SOURCE:-redhat-operators}" \
   KONFLUX_INDEX_IMAGE="${PRE_UPGRADE_KONFLUX_INDEX_IMAGE:-}" \
   CHANNEL="$(resolve_channel "$PRE_UPGRADE_VERSION" "${PRE_UPGRADE_CHANNEL:-}")" \
-    bash "$SCRIPT_DIR/setup-pipelines-ci.sh" \
+    bash "$HACK_DIR/setup-pipelines-ci.sh" \
     || die "setup-pipelines-ci.sh failed"
 fi
 FW="$(printf '%s' "${TEST_FRAMEWORK:-gauge}" | tr '[:upper:]' '[:lower:]')"
@@ -332,3 +333,8 @@ EOF
 }
 
 write_pipelinerun
+
+# Configure Tekton MCP server for AI agents (Cursor / Claude Code)
+if [[ -x "$HACK_DIR/configure-mcp.sh" ]]; then
+  "$HACK_DIR/configure-mcp.sh" 2>/dev/null || true
+fi

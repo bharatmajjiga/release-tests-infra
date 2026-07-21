@@ -14,6 +14,64 @@ scripts/run-workflow.sh
   3. scripts/hack/create-pipelinerun.sh — PipelineRun from .env (no static YAML to maintain)
 ```
 
+## Prerequisites
+
+### Required CLI tools
+
+| Tool | Purpose | Install |
+|------|---------|---------|
+| `oc` | OpenShift CLI | [mirror.openshift.com](https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/) |
+| `python3` + `pyyaml` | ci-config.yaml parsing, pull-secret updates | `pip3 install pyyaml` |
+| `jq` | JSON processing | `brew install jq` / `dnf install jq` |
+| `curl`, `git` | Downloads, repo cloning | Pre-installed on most systems |
+
+### Optional CLI tools
+
+| Tool | When needed | Install |
+|------|-------------|---------|
+| `vault` | Automated credential management (`CRED_SOURCE=vault`) | [vaultproject.io](https://developer.hashicorp.com/vault/install) |
+| `aws` | AWS IPI cluster provisioning (`INSTALLER=aws-ipi`) | [aws.amazon.com/cli](https://aws.amazon.com/cli/) |
+| `docker` / `podman` | FIPS cluster provisioning, CI image builds | `brew install podman` |
+| `skopeo` | Image inspection, registry auth testing | `brew install skopeo` |
+
+### Cluster access
+
+One of the following:
+- **kubeadmin credentials**: `KUBEADMIN_PASSWORD` + `APISERVER` in `.env`
+- **SA token**: `OC_TOKEN` + `CLUSTER_CA_CERT` in `.env` (for `INSTALLER=cluster-platforms`)
+- **AWS credentials**: `AWS_ACCESS_KEY` + `AWS_ACCESS_SECRET` for `INSTALLER=aws-ipi`
+
+### Vault access (recommended)
+
+Vault provides centralized credential management. When `CRED_SOURCE=vault`, all secrets (GitHub, GitLab, Quay, Brew, stage registry, etc.) are pulled automatically.
+
+**Vault details:**
+- URL: `https://vault.ci.openshift.org`
+- Auth method: OIDC via Red Hat SSO
+
+**Request access:**
+1. Ensure you have a Red Hat SSO account (Kerberos ID)
+2. Request access to the `selfservice/openshift-pipelines` Vault path via your team lead or [Vault self-service](https://vault.ci.openshift.org)
+
+**Login and verify:**
+
+```bash
+export VAULT_ADDR=https://vault.ci.openshift.org
+vault login -method=oidc
+```
+
+**Use with scripts:**
+
+```bash
+# Set in .env
+CRED_SOURCE=vault
+VAULT_ADDR=https://vault.ci.openshift.org
+
+### Optional
+# Scripts auto-pull credentials from Vault
+./scripts/hack/create-secrets.sh
+```
+
 ## Quick Start
 
 ```bash
@@ -68,7 +126,7 @@ oc get pipelinerun -n pipelines-ci -w
 Set `INSTALLER=aws-ipi` in `.env` with upgrade-specific vars, then:
 
 ```bash
-./scripts/hack/run-upgrade-tests.sh
+./scripts/run-upgrade-tests.sh
 ```
 
 The pipeline provisions an AWS IPI cluster, installs the pre-upgrade operator version, runs pre-upgrade tests, upgrades the operator, runs all post-upgrade suites, then destroys the cluster in the finally block.
@@ -99,11 +157,11 @@ release-tests-infra/
 ├── env.template / .env          # Configuration (not committed)
 ├── scripts/
 │   ├── run-workflow.sh          # Entry point (orchestrates everything)
+│   ├── run-upgrade-tests.sh          # Create upgrade-tests PipelineRun (AWS IPI)
 │   └── hack/                    # Helper scripts
 │       ├── setup-pipelines-ci.sh      # Namespace + cluster secret + Tekton apply
 │       ├── create-secrets.sh          # Secrets from .env or Vault
 │       ├── create-pipelinerun.sh      # Create acceptance-tests PipelineRun
-│       ├── run-upgrade-tests.sh       # Create upgrade-tests PipelineRun (AWS IPI)
 │       ├── cluster-login.sh           # Shared oc login helpers
 │       ├── cleanup-pipeline-pvcs.sh   # Remove per-run workspace PVCs
 │       └── cleanup-orphan-clusters.sh # Destroy orphaned AWS IPI clusters
@@ -176,3 +234,190 @@ Test suites run in parallel after operator installation. To prevent CPU starvati
   → pipelines-ci namespace
   → release-tests task (PAC, GitHub, GitLab, …)
 ```
+
+## AI Agent Skills (Cursor / Claude Code)
+
+This repo includes skills and MCP integration that enable AI agents to run CI operations via natural language.
+
+```
+User (natural language)
+    │
+    ▼
+AI Agent (reads SKILL.md)
+    │
+    ├── reads env/.env.acceptance (or .env.upgrade) → prompts for missing values
+    ├── Tekton MCP server → list/get/create pipeline resources directly
+    └── runs scripts/run-workflow.sh (or individual scripts)
+         │
+         ▼
+    Same shell scripts → same cluster
+```
+
+**Skill location** (shared by both Cursor and Claude Code):
+- `.claude/skills/SKILL.md`
+
+### Per-operation env files
+
+Each operation has its own env file in `env/` — the agent prompts for missing values on first run and reuses them after:
+
+| Operation | Env file | Command |
+|-----------|----------|---------|
+| Acceptance | `env/.env.acceptance` | `ENV_FILE=env/.env.acceptance ./scripts/run-workflow.sh` |
+| Upgrade | `env/.env.upgrade` | `ENV_FILE=env/.env.upgrade ./scripts/run-upgrade-tests.sh` |
+
+### Tekton MCP Server
+
+The [tektoncd/mcp-server](https://github.com/tektoncd/mcp-server) gives agents native Tekton API access — list pipelines, get task logs, create runs — without parsing `oc` output.
+
+**Setup:**
+
+```bash
+# Install the MCP server
+go install github.com/tektoncd/mcp-server/cmd/tekton-mcp-server@latest
+
+# Configure for your current cluster (auto-detects kubeconfig)
+./scripts/hack/configure-mcp.sh
+
+# Or point to a specific kubeconfig
+./scripts/hack/configure-mcp.sh ~/.kube/my-cluster
+
+# Remove when cluster is destroyed
+./scripts/hack/configure-mcp.sh --remove
+```
+
+This creates `.claude/settings.json` (gitignored), which is read by both Cursor and Claude Code. The MCP server runs locally, authenticates via `KUBECONFIG`, and is auto-configured by `run-workflow.sh`.
+
+**MCP tools available to agents:**
+
+| Tool | What it does |
+|------|-------------|
+| `list_pipelineruns` | List PipelineRuns with filtering |
+| `list_taskruns` | List TaskRuns with filtering |
+| `get_pipelinerun` | Get PipelineRun details (YAML/JSON) |
+| `get_taskrun_logs` | Get logs for a TaskRun |
+| `create_pipelinerun` | Create a PipelineRun |
+| `start_pipeline` | Start a Pipeline |
+| `delete_all_pipelineruns` | Bulk delete PipelineRuns |
+| `list_artifacthub_tasks` | Discover tasks from Artifact Hub |
+
+**Example MCP prompts** (tell the agent):
+
+> "List all failed pipeline runs in pipelines-ci"
+
+> "Show me the logs for the release-tests-triggers task"
+
+> "What's the status of the latest acceptance test pipeline?"
+
+> "Delete all completed pipeline runs"
+
+### Example: Full setup on a fresh cluster
+
+Tell the agent:
+
+> "Set up and run acceptance tests on cluster zfvzt at api.cluster-zfvzt.sandbox3465.opentlc.com:6443, password jjL3f-uHnvg, redhat-operator 1.23.0 prod"
+
+The agent will:
+1. Update `.env` with cluster details and operator config
+2. Run `./scripts/run-workflow.sh` (secrets → operator install → pipeline)
+3. Monitor operator readiness and pipeline progress
+4. Report per-suite pass/fail results
+
+### Example: Run acceptance tests
+
+> "Run acceptance tests with e2e tags"
+
+The agent will:
+1. Verify `.env` has `OPERATOR_VERSION`, `APISERVER`, etc.
+2. Run `./scripts/hack/create-pipelinerun.sh`
+3. Monitor with `oc get taskrun`
+
+### Example: Run upgrade tests
+
+> "Run upgrade tests from 1.22.3 prod to 1.23.0 pre-stage"
+
+The agent will:
+1. Set `PRE_UPGRADE_VERSION=1.22.3`, `UPGRADE_VERSION=1.23.0`, etc. in `.env`
+2. Run `./scripts/run-upgrade-tests.sh` (auto-creates secrets, installs pre-upgrade operator, triggers pipeline)
+3. Monitor upgrade pipeline progress
+
+### Example: Provision and manage clusters
+
+> "Provision an arm64 FIPS cluster"
+
+```bash
+# Agent runs:
+ARCH=arm64 FIPS=true ./scripts/hack/provision-cluster-local.sh
+```
+
+> "Clean up unused AWS resources"
+
+```bash
+# Agent runs:
+./scripts/hack/cleanup-orphan-clusters.sh
+```
+
+### Example: Configure .env via natural language
+
+Instead of manually editing `.env`, tell the agent what you want:
+
+> "Switch to prod environment with operator 1.22.3 on redhat-operators"
+
+The agent updates `.env`:
+```
+OPERATOR_VERSION=1.23.0       →  OPERATOR_VERSION=1.22.3
+OPERATOR_ENVIRONMENT=pre-stage →  OPERATOR_ENVIRONMENT=prod
+CATALOG_SOURCE=custom-operators → CATALOG_SOURCE=redhat-operators
+KONFLUX_INDEX_IMAGE=quay.io/... → KONFLUX_INDEX_IMAGE=
+```
+
+> "Use cluster abc123 at api.abc123.example.com with password xyz"
+
+The agent updates `.env`:
+```
+CLUSTER_NAME=abc123
+APISERVER=https://api.abc123.example.com:6443
+KUBEADMIN_PASSWORD=xyz
+INSTALLER=none
+```
+
+> "Run only versions and pipelines tests with sanity tags"
+
+The agent updates `.env`:
+```
+TEST_SUITES=release-tests-versions,release-tests-pipelines
+TAGS=sanity
+```
+
+> "Set up for disconnected testing"
+
+The agent updates `.env`:
+```
+IS_DISCONNECTED=true
+TAGS=sanity
+TEST_SUITES=release-tests-versions,release-tests-pipelines,...  (disconnected profile)
+```
+
+> "Configure upgrade from 1.22.3 prod to 1.23.0 pre-stage"
+
+The agent updates `.env`:
+```
+PRE_UPGRADE_VERSION=1.22.3
+PRE_UPGRADE_OPERATOR_ENVIRONMENT=prod
+PRE_UPGRADE_CATALOG_SOURCE=redhat-operators
+UPGRADE_VERSION=1.23.0
+UPGRADE_OPERATOR_ENVIRONMENT=pre-stage
+UPGRADE_CATALOG_SOURCE=custom-operators
+UPGRADE_KONFLUX_INDEX_IMAGE=quay.io/openshift-pipeline/pipelines-index-4.21:v1.23.0
+```
+
+The agent reads `env.template` profiles and `ci-config.yaml` to auto-resolve channels and git branches — you only need to specify what changes.
+
+### Example: Diagnose failures
+
+> "Why did release-tests-triggers fail?"
+
+The agent will:
+1. Find the latest PipelineRun
+2. Get the TaskRun status and pod name
+3. Read the logs: `oc logs -n pipelines-ci <pod> -c step-run --tail=30`
+4. Identify the root cause and suggest a fix

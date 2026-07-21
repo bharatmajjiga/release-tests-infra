@@ -92,7 +92,11 @@ if [[ "${1:-}" == "--destroy" ]]; then
   echo "  Binary: $OI_BIN"
   echo "  Dir:    $target"
   "$OI_BIN" destroy cluster --dir="$target" --log-level=info
-  echo "Cluster destroyed. Install dir preserved at: $target"
+  echo "Cluster destroyed."
+  rm -rf "$target"
+  echo "Removed install directory: $target"
+  # Remove MCP config pointing to destroyed cluster
+  [[ -x "$SCRIPT_DIR/configure-mcp.sh" ]] && "$SCRIPT_DIR/configure-mcp.sh" --remove 2>/dev/null || true
   exit 0
 fi
 
