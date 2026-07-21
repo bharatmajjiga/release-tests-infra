@@ -238,6 +238,8 @@ spec:
     params:
       - name: OSP_VERSION
         value: $(params.PRE_UPGRADE_VERSION)
+      - name: IMAGE
+        value: $(params.IMAGE)
       - name: CLUSTER_NAME
         value: $(tasks.provision-cluster.results.cluster-name)
       - name: TKN_DOWNLOAD_URL
@@ -270,6 +272,8 @@ spec:
     params:
       - name: OSP_VERSION
         value: $(params.PRE_UPGRADE_VERSION)
+      - name: IMAGE
+        value: $(params.IMAGE)
       - name: CLUSTER_NAME
         value: $(tasks.provision-cluster.results.cluster-name)
       - name: TKN_DOWNLOAD_URL
