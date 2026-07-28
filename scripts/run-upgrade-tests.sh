@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HACK_DIR="${SCRIPT_DIR}/hack"
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
+export ENV_FILE
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -119,8 +120,29 @@ case "${INSTALLER,,}" in
       || missing+=("azure-creds secret (run ./scripts/hack/create-secrets.sh with INSTALLER=aro)")
     ;;
   none|cluster-platforms|cp)
-    cluster_secret_exists "$NS" \
-      || missing+=("cluster secret $(cluster_secret_name) (run ./scripts/hack/setup-pipelines-ci.sh)")
+    if ! cluster_secret_exists "$NS"; then
+      echo "Cluster secret missing — auto-creating from ${ENV_FILE}..."
+      validate_cluster_env || missing+=("cluster connection (set APISERVER + KUBEADMIN_PASSWORD in ${ENV_FILE})")
+      if [[ ${#missing[@]} -eq 0 ]]; then
+        cluster_login || missing+=("cluster login failed")
+      fi
+      if [[ ${#missing[@]} -eq 0 ]]; then
+        _secret="$(cluster_secret_name)"
+        _args=(
+          --from-literal=admin-name="$(cluster_admin_name)"
+          --from-literal=api-url="${APISERVER}"
+          --from-literal=admin-token="$(cluster_admin_token)"
+          --from-literal=kubeadmin-password="${KUBEADMIN_PASSWORD:-}"
+          --from-literal=user-password="${USER_PASSWORD:-user}"
+          --from-literal=insecure-skip-tls-verify="$(cluster_insecure_tls)"
+          --from-literal=installer="$(cluster_installer)"
+          --from-literal=mirror-reg=quay.io
+        )
+        oc create secret generic "$_secret" "${_args[@]}" -n "$NS"
+        oc label secret "$_secret" keep-cluster=true -n "$NS" --overwrite
+        echo "Created cluster secret ${_secret}"
+      fi
+    fi
     ;;
 esac
 

@@ -10,7 +10,7 @@ spec:
       description: Operator version (used as path prefix for organizing artifacts)
       default: ""
     - name: IMAGE
-      description: CI image with gcloud/gsutil pre-installed
+      description: CI image (uses curl for GCS uploads — works on all architectures)
       default: quay.io/openshift-pipeline/ci:latest
   results:
     - name: artifacts-url
@@ -69,59 +69,44 @@ spec:
           exit 0
         fi
 
-        # GCS upload: use gcloud if available, fall back to curl + JSON API (for ppc64le/s390x)
-        GCS_ACCESS_TOKEN=""
-        if command -v gcloud &>/dev/null; then
-          echo "Using gcloud CLI for uploads..."
-          gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}" --quiet
-          USE_GCLOUD=true
-        else
-          echo "gcloud not available (ppc64le/s390x) — using curl with GCS JSON API..."
-          USE_GCLOUD=false
-          # Generate OAuth2 access token from service account key using curl + openssl
-          _sa_email=$(python3 -c "import json,sys; print(json.load(open('${GOOGLE_APPLICATION_CREDENTIALS}'))['client_email'])")
-          _private_key_file=$(mktemp)
-          python3 -c "import json,sys; print(json.load(open('${GOOGLE_APPLICATION_CREDENTIALS}'))['private_key'])" > "$_private_key_file"
+        # Generate OAuth2 access token from service account key using curl + openssl (works on all architectures)
+        _sa_email=$(python3 -c "import json,sys; print(json.load(open('${GOOGLE_APPLICATION_CREDENTIALS}'))['client_email'])")
+        _private_key_file=$(mktemp)
+        python3 -c "import json,sys; print(json.load(open('${GOOGLE_APPLICATION_CREDENTIALS}'))['private_key'])" > "$_private_key_file"
 
-          _header=$(printf '{"alg":"RS256","typ":"JWT"}' | openssl base64 -e | tr -d '=\n' | tr '/+' '_-')
-          _now=$(date +%s)
-          _exp=$((_now + 3600))
-          _claim=$(printf '{"iss":"%s","scope":"https://www.googleapis.com/auth/devstorage.read_write","aud":"https://oauth2.googleapis.com/token","iat":%d,"exp":%d}' "$_sa_email" "$_now" "$_exp" | openssl base64 -e | tr -d '=\n' | tr '/+' '_-')
-          _sign_input="${_header}.${_claim}"
-          _signature=$(printf '%s' "$_sign_input" | openssl dgst -sha256 -sign "$_private_key_file" | openssl base64 -e | tr -d '=\n' | tr '/+' '_-')
-          _jwt="${_sign_input}.${_signature}"
-          rm -f "$_private_key_file"
+        _header=$(printf '{"alg":"RS256","typ":"JWT"}' | openssl base64 -e | tr -d '=\n' | tr '/+' '_-')
+        _now=$(date +%s)
+        _exp=$((_now + 3600))
+        _claim=$(printf '{"iss":"%s","scope":"https://www.googleapis.com/auth/devstorage.read_write","aud":"https://oauth2.googleapis.com/token","iat":%d,"exp":%d}' "$_sa_email" "$_now" "$_exp" | openssl base64 -e | tr -d '=\n' | tr '/+' '_-')
+        _sign_input="${_header}.${_claim}"
+        _signature=$(printf '%s' "$_sign_input" | openssl dgst -sha256 -sign "$_private_key_file" | openssl base64 -e | tr -d '=\n' | tr '/+' '_-')
+        _jwt="${_sign_input}.${_signature}"
+        rm -f "$_private_key_file"
 
-          GCS_ACCESS_TOKEN=$(curl -sf -X POST "https://oauth2.googleapis.com/token" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${_jwt}" \
-            | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+        GCS_ACCESS_TOKEN=$(curl -sf -X POST "https://oauth2.googleapis.com/token" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${_jwt}" \
+          | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
 
-          if [[ -z "$GCS_ACCESS_TOKEN" ]]; then
-            echo "ERROR: Failed to obtain GCS access token"
-            printf "(auth-failed)" > "$(results.artifacts-url.path)"
-            exit 1
-          fi
-          echo "OAuth2 token obtained successfully"
+        if [[ -z "$GCS_ACCESS_TOKEN" ]]; then
+          echo "ERROR: Failed to obtain GCS access token"
+          printf "(auth-failed)" > "$(results.artifacts-url.path)"
+          exit 1
         fi
+        echo "OAuth2 token obtained successfully"
 
-        # Upload function: works on all architectures
         gcs_upload() {
           local file="$1" dest_name="$2" content_type="${3:-application/octet-stream}"
-          if [[ "$USE_GCLOUD" == true ]]; then
-            gcloud storage cp "$file" "gs://${GCS_BUCKET}/${UPLOAD_PREFIX}/${dest_name}" --quiet
-          else
-            local encoded_name
-            encoded_name=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "${UPLOAD_PREFIX}/${dest_name}")
-            local http_code
-            http_code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-              -H "Authorization: Bearer ${GCS_ACCESS_TOKEN}" \
-              -H "Content-Type: ${content_type}" \
-              --data-binary "@${file}" \
-              "https://storage.googleapis.com/upload/storage/v1/b/${GCS_BUCKET}/o?uploadType=media&name=${encoded_name}")
-            if [[ "$http_code" != "200" ]]; then
-              echo "    WARNING: upload returned HTTP ${http_code} for ${dest_name}"
-            fi
+          local encoded_name
+          encoded_name=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "${UPLOAD_PREFIX}/${dest_name}")
+          local http_code
+          http_code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${GCS_ACCESS_TOKEN}" \
+            -H "Content-Type: ${content_type}" \
+            --data-binary "@${file}" \
+            "https://storage.googleapis.com/upload/storage/v1/b/${GCS_BUCKET}/o?uploadType=media&name=${encoded_name}")
+          if [[ "$http_code" != "200" ]]; then
+            echo "    WARNING: upload returned HTTP ${http_code} for ${dest_name}"
           fi
         }
 

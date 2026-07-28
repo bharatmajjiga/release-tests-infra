@@ -179,22 +179,19 @@ need UPLOADER_USERNAME UPLOADER_PASSWORD UPLOADER_HOST && apply_secret sed \
   -e "s|\$UPLOADER_USERNAME|${UPLOADER_USERNAME}|" -e "s|\$UPLOADER_PASSWORD|${UPLOADER_PASSWORD}|" \
   -e "s|\$UPLOADER_HOST|${UPLOADER_HOST}|" "$SECRETS_DIR/uploader.yaml"
 
-# GCS artifact storage (preferred over legacy uploader)
-_GCS_KEY_FILE="${GCS_SA_KEY_FILE:-}"
-# Also check common default paths
-[[ -z "$_GCS_KEY_FILE" || ! -f "$_GCS_KEY_FILE" ]] && [[ -f "$REPO_ROOT/.gcs-sa-key.json" ]] && _GCS_KEY_FILE="$REPO_ROOT/.gcs-sa-key.json"
-if [[ -n "$_GCS_KEY_FILE" && -f "$_GCS_KEY_FILE" ]]; then
-  echo "Creating gcs-artifacts secret from ${_GCS_KEY_FILE}..."
-  oc create secret generic gcs-artifacts \
-    --from-file=sa-key.json="${_GCS_KEY_FILE}" \
-    --from-literal=bucket="${GCS_BUCKET:-ospqa-ci-artifacts}" \
-    --from-literal=project="${GCS_PROJECT:-pipelines-qe}" \
-    --dry-run=client -o yaml | oc apply -n "$NAMESPACE" -f -
-  CREATED=$((CREATED + 1))
-elif [[ -n "${GCS_SA_KEY_JSON:-}" ]]; then
-  echo "Creating gcs-artifacts secret from GCS_SA_KEY_JSON env var..."
+# GCS artifact storage — pulls SA key from Vault (GCS-TOKEN) or env var
+_gcs_json=""
+if [[ -n "${GCS_SA_KEY_JSON:-}" ]]; then
+  _gcs_json="$GCS_SA_KEY_JSON"
+elif [[ "$CRED_SOURCE" == vault ]] && command -v vault &>/dev/null && [[ -n "${VAULT_TOKEN:-}" ]]; then
+  _gcs_json=$(vault kv get -format=json "${VAULT_KV_MOUNT:-kv}/${VAULT_KV_PATH:-selfservice/openshift-pipelines/osp-ci-secrets}" \
+    2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data'].get('GCS-TOKEN',''))" 2>/dev/null) || true
+fi
+
+if [[ -n "$_gcs_json" ]]; then
+  echo "Creating gcs-artifacts secret..."
   _tmpkey=$(mktemp)
-  printf '%s' "$GCS_SA_KEY_JSON" > "$_tmpkey"
+  printf '%s' "$_gcs_json" > "$_tmpkey"
   oc create secret generic gcs-artifacts \
     --from-file=sa-key.json="$_tmpkey" \
     --from-literal=bucket="${GCS_BUCKET:-ospqa-ci-artifacts}" \
@@ -205,9 +202,9 @@ elif [[ -n "${GCS_SA_KEY_JSON:-}" ]]; then
 else
   if oc get secret gcs-artifacts -n "$NAMESPACE" &>/dev/null; then
     echo "  gcs-artifacts secret already exists"
-  elif [[ -n "${GCS_BUCKET:-}" ]]; then
-    echo "  WARNING: GCS_SA_KEY_FILE not set and .gcs-sa-key.json not found"
-    echo "  Run: ./scripts/hack/setup-gcs-artifacts.sh to create the key"
+  else
+    echo "  WARNING: GCS-TOKEN not found in Vault and GCS_SA_KEY_JSON not set"
+    echo "  Add the GCS SA key JSON as GCS-TOKEN in Vault: ${VAULT_KV_MOUNT:-kv}/${VAULT_KV_PATH}"
   fi
 fi
 
