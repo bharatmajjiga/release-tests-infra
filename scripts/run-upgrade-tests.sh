@@ -88,7 +88,7 @@ INSTALLER="${INSTALLER:-aws-ipi}"
 
 # For cluster-platforms/cp: auto-detect OCP version from running cluster
 case "${INSTALLER,,}" in
-  cluster-platforms|cp)
+  cluster-platforms|cluster-platform|cp)
     # shellcheck source=cluster-login.sh
     source "$HACK_DIR/cluster-login.sh"
     cluster_login || die "cluster login failed"
@@ -119,7 +119,7 @@ case "${INSTALLER,,}" in
     oc get secret azure-creds -n "$NS" &>/dev/null \
       || missing+=("azure-creds secret (run ./scripts/hack/create-secrets.sh with INSTALLER=aro)")
     ;;
-  none|cluster-platforms|cp)
+  none|cluster-platforms|cluster-platform|cp)
     if ! cluster_secret_exists "$NS"; then
       echo "Cluster secret missing — auto-creating from ${ENV_FILE}..."
       validate_cluster_env || missing+=("cluster connection (set APISERVER + KUBEADMIN_PASSWORD in ${ENV_FILE})")
@@ -237,7 +237,7 @@ TAGS="${TAGS:-$([ "$FW" = ginkgo ] && echo sanity || echo e2e)}"
 
 # Build descriptive PipelineRun name: upgrade-tests-aro-1212-to-1222-on-419-
 case "${INSTALLER,,}" in
-  cluster-platforms|cp) _installer_tag="cp-" ;;
+  cluster-platforms|cluster-platform|cp) _installer_tag="cp-" ;;
   aws-ipi|aro|rosa) _installer_tag="${INSTALLER,,}-" ;;
   *) _installer_tag="" ;;
 esac

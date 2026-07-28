@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 cluster_platforms() {
   case "$(printf '%s' "${INSTALLER:-none}" | tr '[:upper:]' '[:lower:]')" in
-    cluster-platforms|cp) return 0 ;; *) return 1 ;; esac
+    cluster-platforms|cluster-platform|cp) return 0 ;; *) return 1 ;; esac
 }
 
 validate_cluster_env() {

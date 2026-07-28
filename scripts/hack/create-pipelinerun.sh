@@ -290,7 +290,7 @@ TAGS="${TAGS:-$([ "$FW" = ginkgo ] && echo sanity || echo e2e)}"
 
 # Build descriptive PipelineRun name: acceptance-tests-aro-1222-prod-on-420-
 case "${INSTALLER,,}" in
-  cluster-platforms|cp) _installer_tag="cp-" ;;
+  cluster-platforms|cluster-platform|cp) _installer_tag="cp-" ;;
   aws-ipi|aro|rosa) _installer_tag="${INSTALLER,,}-" ;;
   *) _installer_tag="" ;;
 esac

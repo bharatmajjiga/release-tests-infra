@@ -34,8 +34,9 @@ EOF
 done
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-[[ -f "$REPO_ROOT/.env" ]] || die "missing $REPO_ROOT/.env"
-set -a; source "$REPO_ROOT/.env"; set +a
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
+[[ -f "$ENV_FILE" ]] || die "missing $ENV_FILE"
+set -a; source "$ENV_FILE"; set +a
 NAMESPACE="${NAMESPACE:-pipelines-ci}"
 command -v oc >/dev/null || die "oc CLI required"
 # shellcheck source=cluster-login.sh

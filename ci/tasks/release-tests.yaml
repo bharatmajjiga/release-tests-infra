@@ -379,6 +379,7 @@ spec:
             specs/operator*)      echo tests/operator/ ;;
             specs/ecosystem*)     echo tests/ecosystem/ ;;
             specs/metrics*)       echo tests/metrics/ ;;
+            specs/manualapprovalgate*) echo tests/mag/ ;;
             specs/rbac*)          echo tests/operator/ ;;
             specs/addon*)          echo tests/operator/ ;;
             *)                    echo tests/... ;;
