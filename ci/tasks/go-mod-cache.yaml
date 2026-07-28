@@ -48,23 +48,74 @@ spec:
         #!/usr/bin/env bash
         set -euo pipefail
 
-        # Validate stored token; if expired or empty, login with kubeadmin
-        if [[ -n "${ADMIN_TOKEN:-}" ]]; then
-          _code=$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${ADMIN_TOKEN}" "${APISERVER}/api" 2>/dev/null)
-          if [[ "$_code" != "200" ]]; then
-            echo "Stored admin-token expired (HTTP ${_code}), re-authenticating"
+        # Auto-refresh API token using curl (oc is not yet available at this stage)
+        refresh_api_token() {
+          if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+            _code=$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${ADMIN_TOKEN}" "${APISERVER}/api" 2>/dev/null)
+            if [[ "$_code" == "200" ]]; then
+              return 0
+            fi
+            echo "Stored admin-token expired (HTTP ${_code}), re-authenticating..."
             ADMIN_TOKEN=""
           fi
-        fi
-        if [[ -z "${ADMIN_TOKEN:-}" && -n "${ADMIN_PASSWORD:-}" ]]; then
-          oc login -u "${ADMIN_NAME:-kubeadmin}" -p "${ADMIN_PASSWORD}" "${APISERVER}" \
-            --insecure-skip-tls-verify=true >/dev/null 2>&1 \
-            && ADMIN_TOKEN=$(oc whoami -t 2>/dev/null) || true
-        fi
-        if [[ -n "${ADMIN_TOKEN:-}" ]]; then
-          echo "Authenticated as $(oc whoami 2>/dev/null || echo admin)"
-        else
+
+          # Use OpenShift OAuth challenge to get a fresh token via curl (no oc needed)
+          if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
+            local user="${ADMIN_NAME:-kubeadmin}"
+            local oauth_route
+            # Discover OAuth server URL from the cluster
+            oauth_route=$(curl -sk "${APISERVER}/.well-known/oauth-authorization-server" 2>/dev/null \
+              | sed -n 's/.*"issuer"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p') || true
+
+            if [[ -z "$oauth_route" ]]; then
+              # Fallback: construct from APISERVER (replace api. with oauth-openshift.apps.)
+              local apps_domain
+              apps_domain=$(echo "$APISERVER" | sed -E 's|https://api\.([^:]+).*|\1|')
+              oauth_route="https://oauth-openshift.apps.${apps_domain}"
+            fi
+
+            for attempt in 1 2 3; do
+              # Request token via OAuth authorize endpoint with basic auth challenge
+              local token_response
+              token_response=$(curl -sk -I -u "${user}:${ADMIN_PASSWORD}" \
+                "${oauth_route}/oauth/authorize?client_id=openshift-challenging-client&response_type=token" \
+                2>/dev/null | grep -i "^location:" | head -1) || true
+
+              if [[ "$token_response" == *"access_token="* ]]; then
+                ADMIN_TOKEN=$(echo "$token_response" | sed -n 's/.*access_token=\([^&]*\).*/\1/p' | tr -d '\r')
+                if [[ -n "$ADMIN_TOKEN" ]]; then
+                  echo "Re-authenticated as ${user} via OAuth (attempt ${attempt})"
+                  # Update cluster secret so subsequent tasks get a valid token
+                  # Uses the management cluster SA token (already in the pod)
+                  local sa_token
+                  sa_token=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null) || true
+                  if [[ -n "$sa_token" ]]; then
+                    local secret_patch="{\"stringData\":{\"admin-token\":\"${ADMIN_TOKEN}\"}}"
+                    local ns
+                    ns=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null) || ns="pipelines-ci"
+                    curl -sk -X PATCH \
+                      -H "Authorization: Bearer ${sa_token}" \
+                      -H "Content-Type: application/merge-patch+json" \
+                      --data "${secret_patch}" \
+                      "https://kubernetes.default.svc/api/v1/namespaces/${ns}/secrets/cluster-$(params.CLUSTER_NAME)" \
+                      > /dev/null 2>&1 \
+                      && echo "Updated cluster secret with fresh token" || true
+                  fi
+                  return 0
+                fi
+              fi
+              echo "  OAuth attempt ${attempt} failed, retrying in 5s..."
+              sleep 5
+            done
+          fi
+
           echo "WARNING: No valid API token — CLI downloads will use fallback URLs"
+          return 1
+        }
+
+        refresh_api_token || true
+        if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+          echo "Authenticated (token valid)"
         fi
 
         pod_arch() {

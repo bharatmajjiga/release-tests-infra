@@ -388,13 +388,27 @@ spec:
         ginkgo_label_filter() {
           local tags="$1"
           case "$tags" in
-            install|uninstall|upgrade) echo "$tags" ;;
-            e2e) echo 'e2e && !disconnected' ;;
+            install|uninstall|upgrade) echo "$tags"; return ;;
+            e2e) tags='e2e' ;;
             *)
               # gauge-style "a,b" or "a & b" → ginkgo label syntax; slashes break ginkgo labels (linux/amd64)
-              echo "$tags" | sed 's/[[:space:]]*&[[:space:]]*/ \&\& /g; s/,/ \&\& /g; s|/|_|g'
+              tags=$(echo "$tags" | sed 's/[[:space:]]*&[[:space:]]*/ \&\& /g; s/,/ \&\& /g; s|/|_|g')
               ;;
           esac
+
+          # Inject suite-specific label for operator sub-suites that share tests/operator/
+          case "$(params.SPECS)" in
+            specs/operator/rbac.spec|specs/rbac*)       tags="${tags} && rbac" ;;
+            specs/operator/addon.spec|specs/addon*)     tags="${tags} && addon" ;;
+            specs/operator/auto-prune.spec)             tags="${tags} && auto-prune" ;;
+          esac
+
+          # Exclude disconnected-only tests on connected clusters
+          if [[ "$(params.IS_DISCONNECTED)" != "true" ]]; then
+            tags="${tags} && !disconnected"
+          fi
+
+          echo "$tags"
         }
 
         require_tools() {

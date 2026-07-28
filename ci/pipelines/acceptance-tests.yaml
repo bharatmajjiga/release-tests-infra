@@ -1343,6 +1343,21 @@ spec:
         subPath: results
 
   finally:
+    - name: upload-artifacts-gcs
+      onError: continue
+      timeout: 10m
+      params:
+        - name: PIPELINE_RUN_NAME
+          value: $(context.pipelineRun.name)
+        - name: OPERATOR_VERSION
+          value: $(params.OPERATOR_VERSION)
+      taskRef:
+        name: upload-artifacts-gcs
+      workspaces:
+        - name: results
+          workspace: data
+          subPath: results
+
     - name: destroy-cluster
       onError: continue
       timeout: 30m

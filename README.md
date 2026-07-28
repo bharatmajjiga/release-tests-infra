@@ -183,6 +183,90 @@ release-tests-infra/
     └── operators/               # install-pipelines.sh, uninstall-pipelines.sh
 ```
 
+## Artifact Storage (GCS)
+
+PipelineRun test results (XML reports, logs, pass/fail status) are automatically uploaded to Google Cloud Storage in the pipeline's `finally` block and retained for 30 days before auto-deletion.
+
+**Cost:** $0.00/month (within GCS 5GB always-free tier).
+
+### Setup (one-time)
+
+```bash
+# Full setup: creates bucket, service account, lifecycle rule, K8s secret
+./scripts/hack/setup-gcs-artifacts.sh
+
+# Or step-by-step:
+# 1. Ensure gcloud is authenticated: gcloud auth login
+# 2. Set GCS_PROJECT in .env (default: pipelines-qe)
+# 3. Run the setup script
+GCS_PROJECT=pipelines-qe GCS_BUCKET=ospqa-ci-artifacts ./scripts/hack/setup-gcs-artifacts.sh
+```
+
+The script:
+1. Creates a GCS bucket in `us-east1` (free-tier eligible region)
+2. Configures a 30-day auto-delete lifecycle rule
+3. Creates a service account with Storage Object Admin
+4. Enables public read access (team can browse via URL)
+5. Creates the `gcs-artifacts` K8s secret in `pipelines-ci`
+
+### Viewing artifacts
+
+After any PipelineRun completes (pass or fail), the upload task prints the artifact URL:
+
+```
+============================================================
+  ARTIFACTS UPLOADED: 12 files
+============================================================
+
+  View results: https://storage.googleapis.com/ospqa-ci-artifacts/CI/1.23.0/acceptance-tests-abc123/index.html
+
+  Direct files: https://storage.googleapis.com/ospqa-ci-artifacts/CI/1.23.0/acceptance-tests-abc123/
+  GCP Console:  https://console.cloud.google.com/storage/browser/ospqa-ci-artifacts/CI/1.23.0/acceptance-tests-abc123
+
+  Auto-delete:  These artifacts expire in 30 days.
+============================================================
+```
+
+URL pattern: `https://storage.googleapis.com/<bucket>/CI/<version>/<pipelinerun-name>/index.html`
+
+### Testing the upload
+
+```bash
+# Apply the task
+oc apply -f ci/tasks/upload-artifacts-gcs.yaml -n pipelines-ci
+
+# Run the test PipelineRun (generates sample artifacts and uploads)
+oc create -f ci/pipelineruns/upload-artifacts-gcs-test.yaml -n pipelines-ci
+
+# Watch progress
+oc get pipelinerun -n pipelines-ci --sort-by=.metadata.creationTimestamp | tail -3
+```
+
+### Verify setup
+
+```bash
+./scripts/hack/setup-gcs-artifacts.sh --verify
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GCS_PROJECT` | `pipelines-qe` | GCP project ID |
+| `GCS_BUCKET` | `ospqa-ci-artifacts` | Bucket name |
+| `GCS_LOCATION` | `us-east1` | Region (must be free-tier eligible) |
+| `GCS_RETENTION_DAYS` | `30` | Days before auto-deletion |
+| `GCS_SA_KEY_FILE` | `.gcs-sa-key.json` | SA key file (auto-created, gitignored) |
+
+### Free-tier limits
+
+| Resource | Free Allowance | CI Usage |
+|----------|----------------|----------|
+| Storage | 5 GB/month | ~500 MB (30-day window) |
+| Class A ops (PUT) | 5,000/month | ~5,000 |
+| Class B ops (GET) | 50,000/month | ~10,000 |
+| Egress | 1 GB/month | ~1 GB |
+
 ## Multi-arch
 
 The CI image (`images/ci/Dockerfile`) is built on `ubi9/go-toolset:latest` and supports amd64, arm64, ppc64le, and s390x. Pre-installed tools:
@@ -265,27 +349,33 @@ Each operation has its own env file in `env/` — the agent prompts for missing 
 | Acceptance | `env/.env.acceptance` | `ENV_FILE=env/.env.acceptance ./scripts/run-workflow.sh` |
 | Upgrade | `env/.env.upgrade` | `ENV_FILE=env/.env.upgrade ./scripts/run-upgrade-tests.sh` |
 
-### Tekton MCP Server
+### Tekton MCP Server (Optional)
 
-The [tektoncd/mcp-server](https://github.com/tektoncd/mcp-server) gives agents native Tekton API access — list pipelines, get task logs, create runs — without parsing `oc` output.
+The [tektoncd/mcp-server](https://github.com/tektoncd/mcp-server) gives agents native Tekton API access — list pipelines, get task logs, create runs — without parsing `oc` output. This is **not configured by default** — set it up manually if you want AI agents to interact directly with Tekton resources.
 
-**Setup:**
+**Setup steps:**
 
-```bash
-# Install the MCP server
-go install github.com/tektoncd/mcp-server/cmd/tekton-mcp-server@latest
+1. Install the MCP server binary:
+   ```bash
+   go install github.com/tektoncd/mcp-server/cmd/tekton-mcp-server@latest
+   ```
 
-# Configure for your current cluster (auto-detects kubeconfig)
-./scripts/hack/configure-mcp.sh
+2. Configure for your current cluster (auto-detects kubeconfig):
+   ```bash
+   ./scripts/hack/configure-mcp.sh
+   ```
 
-# Or point to a specific kubeconfig
-./scripts/hack/configure-mcp.sh ~/.kube/my-cluster
+3. Or point to a specific kubeconfig:
+   ```bash
+   ./scripts/hack/configure-mcp.sh ~/.kube/my-cluster
+   ```
 
-# Remove when cluster is destroyed
-./scripts/hack/configure-mcp.sh --remove
-```
+4. Remove when cluster is destroyed:
+   ```bash
+   ./scripts/hack/configure-mcp.sh --remove
+   ```
 
-This creates `.claude/settings.json` (gitignored), which is read by both Cursor and Claude Code. The MCP server runs locally, authenticates via `KUBECONFIG`, and is auto-configured by `run-workflow.sh`.
+This creates `.claude/settings.json` (gitignored), which is read by both Cursor and Claude Code. The MCP server runs locally and authenticates via `KUBECONFIG`.
 
 **MCP tools available to agents:**
 

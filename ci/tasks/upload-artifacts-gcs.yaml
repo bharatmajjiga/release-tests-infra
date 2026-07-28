@@ -1,0 +1,264 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: upload-artifacts-gcs
+spec:
+  params:
+    - name: PIPELINE_RUN_NAME
+      description: Name of the PipelineRun (used in GCS path and URL generation)
+    - name: OPERATOR_VERSION
+      description: Operator version (used as path prefix for organizing artifacts)
+      default: ""
+    - name: IMAGE
+      description: CI image with gcloud/gsutil pre-installed
+      default: quay.io/openshift-pipeline/ci:latest
+  results:
+    - name: artifacts-url
+      description: Public URL to the artifacts index.html (clickable, no auth required)
+  workspaces:
+    - name: results
+      readOnly: true
+  steps:
+    - name: upload
+      image: $(params.IMAGE)
+      env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: /gcs/sa-key.json
+        - name: GCS_BUCKET
+          valueFrom:
+            secretKeyRef:
+              name: gcs-artifacts
+              key: bucket
+        - name: GCS_PROJECT
+          valueFrom:
+            secretKeyRef:
+              name: gcs-artifacts
+              key: project
+              optional: true
+      volumeMounts:
+        - name: gcs-creds
+          mountPath: /gcs
+          readOnly: true
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        PIPELINE_RUN="$(params.PIPELINE_RUN_NAME)"
+        OPERATOR_VERSION="$(params.OPERATOR_VERSION)"
+        RESULTS_DIR="$(workspaces.results.path)"
+
+        if [[ -z "$OPERATOR_VERSION" ]]; then
+          UPLOAD_PREFIX="CI/${PIPELINE_RUN}"
+        else
+          UPLOAD_PREFIX="CI/${OPERATOR_VERSION}/${PIPELINE_RUN}"
+        fi
+
+        ARTIFACTS_URL="https://storage.googleapis.com/${GCS_BUCKET}/${UPLOAD_PREFIX}/index.html"
+
+        has_artifacts=false
+        for pattern in "*.result" "*.xml" "*.log" "*.html"; do
+          if compgen -G "${RESULTS_DIR}/${pattern}" >/dev/null 2>&1; then
+            has_artifacts=true
+            break
+          fi
+        done
+
+        if [[ "$has_artifacts" == false ]]; then
+          echo "No artifacts found in ${RESULTS_DIR}, skipping upload."
+          printf "(none)" > "$(results.artifacts-url.path)"
+          exit 0
+        fi
+
+        # GCS upload: use gcloud if available, fall back to curl + JSON API (for ppc64le/s390x)
+        GCS_ACCESS_TOKEN=""
+        if command -v gcloud &>/dev/null; then
+          echo "Using gcloud CLI for uploads..."
+          gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}" --quiet
+          USE_GCLOUD=true
+        else
+          echo "gcloud not available (ppc64le/s390x) — using curl with GCS JSON API..."
+          USE_GCLOUD=false
+          # Generate OAuth2 access token from service account key using curl + openssl
+          _sa_email=$(python3 -c "import json,sys; print(json.load(open('${GOOGLE_APPLICATION_CREDENTIALS}'))['client_email'])")
+          _private_key_file=$(mktemp)
+          python3 -c "import json,sys; print(json.load(open('${GOOGLE_APPLICATION_CREDENTIALS}'))['private_key'])" > "$_private_key_file"
+
+          _header=$(printf '{"alg":"RS256","typ":"JWT"}' | openssl base64 -e | tr -d '=\n' | tr '/+' '_-')
+          _now=$(date +%s)
+          _exp=$((_now + 3600))
+          _claim=$(printf '{"iss":"%s","scope":"https://www.googleapis.com/auth/devstorage.read_write","aud":"https://oauth2.googleapis.com/token","iat":%d,"exp":%d}' "$_sa_email" "$_now" "$_exp" | openssl base64 -e | tr -d '=\n' | tr '/+' '_-')
+          _sign_input="${_header}.${_claim}"
+          _signature=$(printf '%s' "$_sign_input" | openssl dgst -sha256 -sign "$_private_key_file" | openssl base64 -e | tr -d '=\n' | tr '/+' '_-')
+          _jwt="${_sign_input}.${_signature}"
+          rm -f "$_private_key_file"
+
+          GCS_ACCESS_TOKEN=$(curl -sf -X POST "https://oauth2.googleapis.com/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${_jwt}" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+
+          if [[ -z "$GCS_ACCESS_TOKEN" ]]; then
+            echo "ERROR: Failed to obtain GCS access token"
+            printf "(auth-failed)" > "$(results.artifacts-url.path)"
+            exit 1
+          fi
+          echo "OAuth2 token obtained successfully"
+        fi
+
+        # Upload function: works on all architectures
+        gcs_upload() {
+          local file="$1" dest_name="$2" content_type="${3:-application/octet-stream}"
+          if [[ "$USE_GCLOUD" == true ]]; then
+            gcloud storage cp "$file" "gs://${GCS_BUCKET}/${UPLOAD_PREFIX}/${dest_name}" --quiet
+          else
+            local encoded_name
+            encoded_name=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "${UPLOAD_PREFIX}/${dest_name}")
+            local http_code
+            http_code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer ${GCS_ACCESS_TOKEN}" \
+              -H "Content-Type: ${content_type}" \
+              --data-binary "@${file}" \
+              "https://storage.googleapis.com/upload/storage/v1/b/${GCS_BUCKET}/o?uploadType=media&name=${encoded_name}")
+            if [[ "$http_code" != "200" ]]; then
+              echo "    WARNING: upload returned HTTP ${http_code} for ${dest_name}"
+            fi
+          fi
+        }
+
+        echo "Uploading artifacts to gs://${GCS_BUCKET}/${UPLOAD_PREFIX}/"
+        count=0
+        total_pass=0
+        total_fail=0
+        failed_suites=""
+        for f in "${RESULTS_DIR}"/*.result "${RESULTS_DIR}"/*.xml "${RESULTS_DIR}"/*.log "${RESULTS_DIR}"/*.html; do
+          [[ -f "$f" ]] || continue
+          gcs_upload "$f" "$(basename "$f")"
+          echo "  uploaded: $(basename "$f") ($(du -h "$f" | cut -f1))"
+          count=$((count + 1))
+          if [[ "$(basename "$f")" == *.result ]]; then
+            content=$(cat "$f")
+            if [[ "$content" == *"pass"* ]]; then
+              total_pass=$((total_pass + 1))
+            else
+              total_fail=$((total_fail + 1))
+              suite_name=$(basename "$f" .result)
+              failed_suites="${failed_suites:+${failed_suites}, }${suite_name}"
+            fi
+          fi
+        done
+
+        total_suites=$((total_pass + total_fail))
+        if [[ $total_fail -gt 0 ]]; then
+          summary_status="FAILED"
+          summary_detail="${total_pass}/${total_suites} passed, ${total_fail}/${total_suites} failed"
+          summary_failed="Failed: ${failed_suites}"
+        elif [[ $total_suites -gt 0 ]]; then
+          summary_status="PASSED"
+          summary_detail="${total_pass}/${total_suites} suites passed"
+          summary_failed=""
+        else
+          summary_status="UNKNOWN"
+          summary_detail="No .result files found"
+          summary_failed=""
+        fi
+
+        # Generate index.html with summary and links to each artifact
+        INDEX_FILE=$(mktemp)
+        cat > "$INDEX_FILE" <<HTMLEOF
+        <!DOCTYPE html>
+        <html lang="en"><head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>${PIPELINE_RUN} - Test Artifacts</title>
+        <style>
+          * { box-sizing: border-box; }
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 900px; margin: 0 auto; padding: 2em 1.5em; background: #f8f9fa; color: #212529; line-height: 1.6; }
+          h1 { font-size: 1.5em; font-weight: 700; color: #1a1a2e; border-bottom: 3px solid #dee2e6; padding-bottom: 0.5em; }
+          h2 { font-size: 1.1em; font-weight: 600; color: #495057; margin-top: 1.8em; }
+          a { color: #0d6efd; text-decoration: none; } a:hover { text-decoration: underline; }
+          .meta { color: #6c757d; font-size: 0.88em; }
+          .back { display: inline-block; margin-bottom: 1em; font-size: 0.9em; }
+          .summary { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 1em 1.5em; margin: 1em 0; }
+          .summary-pass { border-left: 4px solid #198754; }
+          .summary-fail { border-left: 4px solid #dc3545; }
+          .summary strong { font-size: 1.05em; }
+          ul { list-style: none; padding: 0; margin: 0; }
+          li { padding: 0.55em 1em; background: #fff; border: 1px solid #e9ecef; border-radius: 6px; margin-bottom: 5px; display: flex; justify-content: space-between; align-items: center; }
+          li:hover { background: #f0f7ff; }
+          li a { font-weight: 500; font-size: 0.93em; }
+          .pass a { color: #198754; } .fail a { color: #dc3545; }
+          .badge { display: inline-block; padding: 2px 10px; border-radius: 4px; font-size: 0.78em; font-weight: 600; }
+          .badge-pass { background: #d1e7dd; color: #0f5132; }
+          .badge-fail { background: #f8d7da; color: #842029; }
+          .size { color: #adb5bd; font-size: 0.82em; }
+          footer { margin-top: 2.5em; padding-top: 1em; border-top: 1px solid #dee2e6; color: #adb5bd; font-size: 0.82em; }
+        </style></head><body>
+        <a class="back" href="../../index.html">&larr; Back to all runs</a>
+        <h1>${PIPELINE_RUN}</h1>
+        <p class="meta">Operator: ${OPERATOR_VERSION:-unknown} | Uploaded: $(date -u '+%Y-%m-%d %H:%M UTC') | Auto-deletes in 30 days</p>
+        HTMLEOF
+
+        if [[ "$summary_status" == "FAILED" ]]; then
+          echo "<div class=\"summary summary-fail\"><strong>${summary_detail}</strong><br><span class=\"meta\">${summary_failed}</span></div>" >> "$INDEX_FILE"
+        else
+          echo "<div class=\"summary summary-pass\"><strong>${summary_detail}</strong></div>" >> "$INDEX_FILE"
+        fi
+
+        echo '<h2>Test Results</h2><ul>' >> "$INDEX_FILE"
+        for f in "${RESULTS_DIR}"/*.result; do
+          [[ -f "$f" ]] || continue
+          fname=$(basename "$f")
+          suite_name="${fname%.result}"
+          content=$(cat "$f")
+          if [[ "$content" == *"pass"* ]]; then
+            echo "<li><a href=\"${fname}\" class=\"pass\">${suite_name}</a> <span class=\"badge badge-pass\">PASS</span></li>" >> "$INDEX_FILE"
+          else
+            echo "<li><a href=\"${fname}\" class=\"fail\">${suite_name}</a> <span class=\"badge badge-fail\">FAIL</span></li>" >> "$INDEX_FILE"
+          fi
+        done
+        echo "</ul>" >> "$INDEX_FILE"
+
+        echo '<h2>Reports and Logs</h2><ul>' >> "$INDEX_FILE"
+        for f in "${RESULTS_DIR}"/*.xml "${RESULTS_DIR}"/*.log; do
+          [[ -f "$f" ]] || continue
+          fname=$(basename "$f")
+          size=$(du -h "$f" | cut -f1)
+          icon="📄"
+          [[ "$fname" == *.xml ]] && icon="📊"
+          [[ "$fname" == *.log ]] && icon="📋"
+          echo "<li><a href=\"${fname}\">${icon} ${fname}</a> <span class=\"size\">${size}</span></li>" >> "$INDEX_FILE"
+        done
+        echo "</ul>" >> "$INDEX_FILE"
+
+        cat >> "$INDEX_FILE" <<HTMLEOF
+        <footer>Generated by release-tests-infra upload-artifacts-gcs task<br>
+        Bucket: gs://${GCS_BUCKET}/${UPLOAD_PREFIX}/</footer>
+        </body></html>
+        HTMLEOF
+
+        gcs_upload "$INDEX_FILE" "index.html" "text/html; charset=utf-8"
+        rm -f "$INDEX_FILE"
+        count=$((count + 1))
+
+        # Write the URL as a Tekton Task Result (available to other tasks and PipelineRun status)
+        printf '%s' "${ARTIFACTS_URL}" > "$(results.artifacts-url.path)"
+
+        echo ""
+        echo ""
+        echo "ARTIFACTS UPLOADED: ${count} files"
+        echo "Status: ${summary_status} (${summary_detail})"
+        [[ -n "$summary_failed" ]] && echo "${summary_failed}"
+        echo ""
+        echo "View results: ${ARTIFACTS_URL}"
+        echo "(Open directly in browser - no login required)"
+        echo ""
+        echo "Auto-delete: These artifacts expire in 30 days."
+        echo ""
+  volumes:
+    - name: gcs-creds
+      secret:
+        secretName: gcs-artifacts
+        items:
+          - key: sa-key.json
+            path: sa-key.json
+        optional: true

@@ -179,6 +179,38 @@ need UPLOADER_USERNAME UPLOADER_PASSWORD UPLOADER_HOST && apply_secret sed \
   -e "s|\$UPLOADER_USERNAME|${UPLOADER_USERNAME}|" -e "s|\$UPLOADER_PASSWORD|${UPLOADER_PASSWORD}|" \
   -e "s|\$UPLOADER_HOST|${UPLOADER_HOST}|" "$SECRETS_DIR/uploader.yaml"
 
+# GCS artifact storage (preferred over legacy uploader)
+_GCS_KEY_FILE="${GCS_SA_KEY_FILE:-}"
+# Also check common default paths
+[[ -z "$_GCS_KEY_FILE" || ! -f "$_GCS_KEY_FILE" ]] && [[ -f "$REPO_ROOT/.gcs-sa-key.json" ]] && _GCS_KEY_FILE="$REPO_ROOT/.gcs-sa-key.json"
+if [[ -n "$_GCS_KEY_FILE" && -f "$_GCS_KEY_FILE" ]]; then
+  echo "Creating gcs-artifacts secret from ${_GCS_KEY_FILE}..."
+  oc create secret generic gcs-artifacts \
+    --from-file=sa-key.json="${_GCS_KEY_FILE}" \
+    --from-literal=bucket="${GCS_BUCKET:-ospqa-ci-artifacts}" \
+    --from-literal=project="${GCS_PROJECT:-pipelines-qe}" \
+    --dry-run=client -o yaml | oc apply -n "$NAMESPACE" -f -
+  CREATED=$((CREATED + 1))
+elif [[ -n "${GCS_SA_KEY_JSON:-}" ]]; then
+  echo "Creating gcs-artifacts secret from GCS_SA_KEY_JSON env var..."
+  _tmpkey=$(mktemp)
+  printf '%s' "$GCS_SA_KEY_JSON" > "$_tmpkey"
+  oc create secret generic gcs-artifacts \
+    --from-file=sa-key.json="$_tmpkey" \
+    --from-literal=bucket="${GCS_BUCKET:-ospqa-ci-artifacts}" \
+    --from-literal=project="${GCS_PROJECT:-pipelines-qe}" \
+    --dry-run=client -o yaml | oc apply -n "$NAMESPACE" -f -
+  rm -f "$_tmpkey"
+  CREATED=$((CREATED + 1))
+else
+  if oc get secret gcs-artifacts -n "$NAMESPACE" &>/dev/null; then
+    echo "  gcs-artifacts secret already exists"
+  elif [[ -n "${GCS_BUCKET:-}" ]]; then
+    echo "  WARNING: GCS_SA_KEY_FILE not set and .gcs-sa-key.json not found"
+    echo "  Run: ./scripts/hack/setup-gcs-artifacts.sh to create the key"
+  fi
+fi
+
 # AWS IPI provisioning secrets (INSTALLER=aws-ipi)
 if [[ "$(printf '%s' "${INSTALLER:-none}" | tr '[:upper:]' '[:lower:]')" == aws-ipi ]]; then
   need AWS_ACCESS_KEY AWS_ACCESS_SECRET || die "INSTALLER=aws-ipi requires AWS_ACCESS_KEY + AWS_ACCESS_SECRET (set in .env or Vault)"

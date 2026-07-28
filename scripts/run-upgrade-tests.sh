@@ -333,8 +333,3 @@ EOF
 }
 
 write_pipelinerun
-
-# Configure Tekton MCP server for AI agents (Cursor / Claude Code)
-if [[ -x "$HACK_DIR/configure-mcp.sh" ]]; then
-  "$HACK_DIR/configure-mcp.sh" 2>/dev/null || true
-fi

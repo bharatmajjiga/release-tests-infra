@@ -63,6 +63,17 @@ RUN git clone --depth 1 https://github.com/openshift/rosa.git /tmp/rosa && \
     cd /tmp/rosa && go build -o /usr/local/bin/rosa ./cmd/rosa && \
     rm -rf /tmp/rosa
 
+# Google Cloud CLI (only amd64/arm64 — not available for ppc64le/s390x)
+RUN if [ "$TARGETARCH" = "amd64" ] || [ "$TARGETARCH" = "arm64" ]; then \
+      GCLOUD_ARCH="x86_64" && \
+      [ "$TARGETARCH" = "arm64" ] && GCLOUD_ARCH="arm" ; \
+      curl -fsSL "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-${GCLOUD_ARCH}.tar.gz" \
+        | tar xz -C /opt && \
+      /opt/google-cloud-sdk/install.sh --quiet --usage-reporting=false --path-update=false && \
+      ln -s /opt/google-cloud-sdk/bin/gcloud /usr/local/bin/gcloud && \
+      ln -s /opt/google-cloud-sdk/bin/gsutil /usr/local/bin/gsutil ; \
+    fi
+
 # Azure CLI (only for amd64/arm64 — no prebuilt wheels for ppc64le/s390x)
 RUN if [ "$TARGETARCH" = "amd64" ] || [ "$TARGETARCH" = "arm64" ]; then \
       pip3 install --no-cache-dir azure-cli; \
