@@ -1,50 +1,40 @@
 #!/usr/bin/env bash
-cluster_platforms() {
+
+is_existing_cluster() {
   case "$(printf '%s' "${INSTALLER:-none}" | tr '[:upper:]' '[:lower:]')" in
-    cluster-platforms|cluster-platform|cp) return 0 ;; *) return 1 ;; esac
+    none|cluster-platforms|cluster-platform|cp) return 0 ;; *) return 1 ;; esac
+}
+
+is_provisioned_installer() {
+  case "$(printf '%s' "${INSTALLER:-none}" | tr '[:upper:]' '[:lower:]')" in
+    aws-ipi|rosa|aro|flexy) return 0 ;; *) return 1 ;; esac
 }
 
 validate_cluster_env() {
   [[ -n "${APISERVER:-}" ]] || { echo "ERROR: APISERVER required in .env" >&2; return 1; }
-
   [[ -n "${KUBEADMIN_PASSWORD:-}" || -n "${OC_TOKEN:-}" ]] || {
     echo "ERROR: KUBEADMIN_PASSWORD or OC_TOKEN required in .env" >&2
     return 1
   }
-
-  if cluster_platforms && [[ -n "${OC_TOKEN:-}" && -n "${CLUSTER_CA_CERT:-}" ]]; then
-    local ca="${CLUSTER_CA_CERT}" root="${REPO_ROOT:-.}"
-    [[ "$ca" != /* ]] && ca="${root}/${ca}"
-    [[ -f "$ca" ]] || {
-      echo "ERROR: CLUSTER_CA_CERT file not found: $ca" >&2
-      return 1
-    }
-  fi
 }
 
-cluster_ca_path() {
-  local root="${REPO_ROOT:-.}" ca="${CLUSTER_CA_CERT:-}"
-  [[ -n "$ca" ]] || return 1
-  [[ "$ca" != /* ]] && ca="${root}/${ca}"
-  [[ -f "$ca" ]] || return 1
-  printf '%s' "$ca"
+validate_cluster_env_or_provisioned() {
+  if is_provisioned_installer; then
+    echo "INSTALLER=${INSTALLER} — cluster will be provisioned by pipeline"
+    return 0
+  fi
+  validate_cluster_env
 }
 
 cluster_login() {
   validate_cluster_env || return 1
-
   if [[ -n "${KUBEADMIN_PASSWORD:-}" ]]; then
     echo "Logging in to ${APISERVER} as ${KUBEADMIN_USER:-kubeadmin}..."
     oc login -u "${KUBEADMIN_USER:-kubeadmin}" -p "$KUBEADMIN_PASSWORD" \
       "$APISERVER" --insecure-skip-tls-verify=true
   elif [[ -n "${OC_TOKEN:-}" ]]; then
-    local ca_flag="--insecure-skip-tls-verify=true"
-    local ca
-    if ca=$(cluster_ca_path 2>/dev/null); then
-      ca_flag="--certificate-authority=${ca}"
-    fi
     echo "Logging in to ${APISERVER} with OC_TOKEN..."
-    oc login --server="${APISERVER}" --token="${OC_TOKEN}" ${ca_flag}
+    oc login --server="${APISERVER}" --token="${OC_TOKEN}" --insecure-skip-tls-verify=true
   fi
   echo "  Authenticated as $(oc whoami)"
 }
@@ -60,27 +50,6 @@ cluster_admin_token() {
   else
     oc whoami -t
   fi
-}
-
-cluster_insecure_tls() {
-  cluster_platforms && echo false || echo true
-}
-
-cluster_installer() {
-  cluster_platforms && echo cluster-platforms || echo "${INSTALLER:-none}"
-}
-
-is_provisioned_installer() {
-  case "$(printf '%s' "${INSTALLER:-none}" | tr '[:upper:]' '[:lower:]')" in
-    aws-ipi|rosa|aro) return 0 ;; *) return 1 ;; esac
-}
-
-validate_cluster_env_or_provisioned() {
-  if is_provisioned_installer; then
-    echo "INSTALLER=${INSTALLER} — cluster will be provisioned by pipeline"
-    return 0
-  fi
-  validate_cluster_env
 }
 
 validate_operator_env() {
@@ -110,28 +79,9 @@ validate_operator_env() {
   esac
 }
 
-secret_installer() {
-  local name=$1 ns=$2 val legacy
-  val=$(oc get secret "$name" -n "$ns" \
-    -o go-template='{{index .data "installer" | base64decode}}' 2>/dev/null || true)
-  if [[ -n "$val" && "$val" != none ]]; then
-    printf '%s' "$val"
-    return 0
-  fi
-  legacy=$(oc get secret "$name" -n "$ns" \
-    -o go-template='{{index .data "cluster-platforms" | base64decode}}' 2>/dev/null || true)
-  if [[ "$(printf '%s' "$legacy" | tr '[:upper:]' '[:lower:]')" == true ]]; then
-    echo cluster-platforms
-  else
-    echo none
-  fi
-}
-
-# cluster-rzlgf for CLUSTER_NAME=rzlgf (strips accidental cluster- prefix from .env)
 cluster_secret_name() {
   [[ -n "${CLUSTER_NAME:-}" ]] || return 1
-  local name="${CLUSTER_NAME#cluster-}"
-  printf 'cluster-%s' "$name"
+  printf 'cluster-%s' "${CLUSTER_NAME#cluster-}"
 }
 
 cluster_secret_exists() {

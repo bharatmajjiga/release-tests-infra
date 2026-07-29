@@ -65,6 +65,7 @@ spec:
       - release-tests-rbac
       - release-tests-addon
       - release-tests-auto-prune
+      - release-tests-tekton-pruner
       - release-tests-manual-approval
       - release-tests-ecosystem
 
@@ -1072,6 +1073,7 @@ spec:
       workspace: data
       subPath: results
 
+  # Sequential suites — run after all parallel post-upgrade tests complete
   - name: release-tests-auto-prune
     onError: continue
     params:
@@ -1096,12 +1098,69 @@ spec:
       - name: TAGS
         value: $(params.TAGS)
     runAfter:
-      - update-pipelines-operator
+      - release-tests-post-upgrade
+      - release-tests-versions
+      - release-tests-pipelines
+      - release-tests-triggers
+      - release-tests-triggers-tls
+      - release-tests-chains
+      - release-tests-pac
+      - release-tests-results
+      - release-tests-metrics
+      - release-tests-rbac
+      - release-tests-addon
+      - release-tests-manual-approval
+      - release-tests-ecosystem
     taskRef:
       name: release-tests
     timeout: 1h30m
     when:
       - input: release-tests-auto-prune
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+  - name: release-tests-tekton-pruner
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/operator/tekton-pruner.spec"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter:
+      - release-tests-auto-prune
+    taskRef:
+      name: release-tests
+    timeout: 1h30m
+    when:
+      - input: release-tests-tekton-pruner
         operator: in
         values: ["$(params.TEST_SUITES[*])"]
     workspaces:
@@ -1232,6 +1291,7 @@ spec:
       - release-tests-rbac
       - release-tests-addon
       - release-tests-auto-prune
+      - release-tests-tekton-pruner
       - release-tests-manual-approval
       - release-tests-ecosystem
     taskRef:

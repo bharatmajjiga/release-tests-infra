@@ -402,6 +402,7 @@ spec:
             specs/operator/rbac.spec|specs/rbac*)       tags="${tags} && rbac" ;;
             specs/operator/addon.spec|specs/addon*)     tags="${tags} && addon" ;;
             specs/operator/auto-prune.spec)             tags="${tags} && auto-prune" ;;
+            specs/operator/tekton-pruner.spec)          tags="${tags} && tekton-pruner" ;;
           esac
 
           # Exclude disconnected-only tests on connected clusters

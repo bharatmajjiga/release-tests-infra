@@ -302,21 +302,16 @@ if [[ -n "${CLUSTER_NAME:-}" && -n "${APISERVER:-}" ]]; then
   else
     validate_cluster_env || die "cluster env validation failed"
     cluster_login || die "cluster login failed"
-    _args=(
-      --from-literal=admin-name="$(cluster_admin_name)"
-      --from-literal=api-url="${APISERVER}"
-      --from-literal=admin-token="$(cluster_admin_token)"
-      --from-literal=kubeadmin-password="${KUBEADMIN_PASSWORD:-}"
-      --from-literal=user-password="${USER_PASSWORD:-user}"
-      --from-literal=insecure-skip-tls-verify="$(cluster_insecure_tls)"
-      --from-literal=installer="$(cluster_installer)"
-      --from-literal=mirror-reg=quay.io
-    )
-    _ca=""
-    if _ca=$(cluster_ca_path 2>/dev/null); then
-      _args+=(--from-file=cluster-ca-cert="$_ca")
-    fi
-    oc create secret generic "$_secret" "${_args[@]}" -n "$NAMESPACE"
+    oc create secret generic "$_secret" \
+      --from-literal=admin-name="$(cluster_admin_name)" \
+      --from-literal=api-url="${APISERVER}" \
+      --from-literal=admin-token="$(cluster_admin_token)" \
+      --from-literal=kubeadmin-password="${KUBEADMIN_PASSWORD:-}" \
+      --from-literal=user-password="${USER_PASSWORD:-user}" \
+      --from-literal=insecure-skip-tls-verify=true \
+      --from-literal=installer="${INSTALLER:-none}" \
+      --from-literal=mirror-reg=quay.io \
+      -n "$NAMESPACE"
     oc label secret "$_secret" keep-cluster=true -n "$NAMESPACE" --overwrite
     echo "Created cluster secret ${_secret}"
     CREATED=$((CREATED + 1))

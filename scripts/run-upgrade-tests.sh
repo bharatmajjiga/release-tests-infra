@@ -86,19 +86,15 @@ command -v oc >/dev/null || die "oc CLI required"
 NS="${NAMESPACE:-pipelines-ci}"
 INSTALLER="${INSTALLER:-aws-ipi}"
 
-# For cluster-platforms/cp: auto-detect OCP version from running cluster
-case "${INSTALLER,,}" in
-  cluster-platforms|cluster-platform|cp)
-    # shellcheck source=cluster-login.sh
-    source "$HACK_DIR/cluster-login.sh"
-    cluster_login || die "cluster login failed"
-    if [[ -z "${OPENSHIFT_VERSION:-}" || "${OPENSHIFT_VERSION}" == stable* ]]; then
-      OPENSHIFT_VERSION=$(oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null || true)
-      [[ -n "$OPENSHIFT_VERSION" ]] || die "Could not detect OCP version from cluster"
-      echo "Auto-detected OCP version: ${OPENSHIFT_VERSION}"
-    fi
-    ;;
-esac
+# For existing clusters: auto-detect OCP version
+if is_existing_cluster; then
+  cluster_login || die "cluster login failed"
+  if [[ -z "${OPENSHIFT_VERSION:-}" || "${OPENSHIFT_VERSION}" == stable* ]]; then
+    OPENSHIFT_VERSION=$(oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null || true)
+    [[ -n "$OPENSHIFT_VERSION" ]] || die "Could not detect OCP version from cluster"
+    echo "Auto-detected OCP version: ${OPENSHIFT_VERSION}"
+  fi
+fi
 
 # --- Validate required vars ---
 missing=()
@@ -119,8 +115,8 @@ case "${INSTALLER,,}" in
     oc get secret azure-creds -n "$NS" &>/dev/null \
       || missing+=("azure-creds secret (run ./scripts/hack/create-secrets.sh with INSTALLER=aro)")
     ;;
-  none|cluster-platforms|cluster-platform|cp)
-    if ! cluster_secret_exists "$NS"; then
+  *)
+    if is_existing_cluster && ! cluster_secret_exists "$NS"; then
       echo "Cluster secret missing — auto-creating from ${ENV_FILE}..."
       validate_cluster_env || missing+=("cluster connection (set APISERVER + KUBEADMIN_PASSWORD in ${ENV_FILE})")
       if [[ ${#missing[@]} -eq 0 ]]; then
@@ -128,17 +124,16 @@ case "${INSTALLER,,}" in
       fi
       if [[ ${#missing[@]} -eq 0 ]]; then
         _secret="$(cluster_secret_name)"
-        _args=(
-          --from-literal=admin-name="$(cluster_admin_name)"
-          --from-literal=api-url="${APISERVER}"
-          --from-literal=admin-token="$(cluster_admin_token)"
-          --from-literal=kubeadmin-password="${KUBEADMIN_PASSWORD:-}"
-          --from-literal=user-password="${USER_PASSWORD:-user}"
-          --from-literal=insecure-skip-tls-verify="$(cluster_insecure_tls)"
-          --from-literal=installer="$(cluster_installer)"
-          --from-literal=mirror-reg=quay.io
-        )
-        oc create secret generic "$_secret" "${_args[@]}" -n "$NS"
+        oc create secret generic "$_secret" \
+          --from-literal=admin-name="$(cluster_admin_name)" \
+          --from-literal=api-url="${APISERVER}" \
+          --from-literal=admin-token="$(cluster_admin_token)" \
+          --from-literal=kubeadmin-password="${KUBEADMIN_PASSWORD:-}" \
+          --from-literal=user-password="${USER_PASSWORD:-user}" \
+          --from-literal=insecure-skip-tls-verify=true \
+          --from-literal=installer="${INSTALLER:-none}" \
+          --from-literal=mirror-reg=quay.io \
+          -n "$NS"
         oc label secret "$_secret" keep-cluster=true -n "$NS" --overwrite
         echo "Created cluster secret ${_secret}"
       fi
@@ -237,7 +232,7 @@ TAGS="${TAGS:-$([ "$FW" = ginkgo ] && echo sanity || echo e2e)}"
 
 # Build descriptive PipelineRun name: upgrade-tests-aro-1212-to-1222-on-419-
 case "${INSTALLER,,}" in
-  cluster-platforms|cluster-platform|cp) _installer_tag="cp-" ;;
+  none|cluster-platforms|cluster-platform|cp) _installer_tag="cp-" ;;
   aws-ipi|aro|rosa) _installer_tag="${INSTALLER,,}-" ;;
   *) _installer_tag="" ;;
 esac
