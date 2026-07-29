@@ -987,8 +987,6 @@ spec:
   # ============================================================
   # Sequential suites — run after all parallel tests complete.
   # auto-prune and tekton-pruner modify global TektonConfig/TektonPruner
-  # and must not overlap with parallel test suites.
-  # Order: all parallel → auto-prune → tekton-pruner → evaluate
   # ============================================================
   - name: release-tests-auto-prune
     onError: continue

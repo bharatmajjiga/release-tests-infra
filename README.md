@@ -75,25 +75,30 @@ Same structure with additional phases: install pre-upgrade version → pre-upgra
 
 ## Test Suite Isolation
 
-Each suite maps to a ginkgo test directory and label filter:
+Each suite maps to a ginkgo test directory and label filter. `ginkgo_label_filter()` builds the filter from TAGS + SPECS:
 
-| Suite | SPECS | Ginkgo Dir | Label Filter |
-|-------|-------|------------|-------------|
-| versions | `specs/versions.spec` | `tests/versions/` | `e2e && !disconnected` |
-| pipelines | `specs/pipelines/` | `tests/pipelines/` | `e2e && !disconnected` |
-| triggers | `specs/triggers/` | `tests/triggers/` | `e2e && !tls && !disconnected` |
-| triggers-tls | `specs/triggers/eventlistener.spec` | `tests/triggers/` | `tls && e2e && !disconnected` |
-| chains | `specs/chains/` | `tests/chains/` | `e2e && !disconnected` |
-| pac | `specs/pac/` | `tests/pac/` | `e2e && !disconnected` |
-| results | `specs/results/` | `tests/results/` | `e2e && !disconnected` |
-| metrics | `specs/metrics/` | `tests/metrics/` | `e2e && !disconnected` |
-| rbac | `specs/operator/rbac.spec` | `tests/operator/` | `e2e && rbac && !disconnected` |
-| addon | `specs/operator/addon.spec` | `tests/operator/` | `e2e && addon && !disconnected` |
-| auto-prune | `specs/operator/auto-prune.spec` | `tests/operator/` | `e2e && auto-prune && !disconnected` |
-| tekton-pruner | `specs/operator/tekton-pruner.spec` | `tests/operator/` | `e2e && tekton-pruner && !disconnected` |
-| manual-approval | `specs/manualapprovalgate/` | `tests/mag/` | `e2e && !disconnected` |
-| ecosystem | `specs/ecosystem/ecosystem.spec` | `tests/ecosystem/` | `e2e && !disconnected` |
-| ecosystem-s2i | `specs/ecosystem/ecosystem-s2i.spec` | `tests/ecosystem/` | `e2e && s2i && !disconnected` |
+| TEST_SUITES value | SPECS | Ginkgo Dir | Label Filter |
+|-------------------|-------|------------|-------------|
+| release-tests-versions | `specs/versions.spec` | `tests/versions/` | `e2e` |
+| release-tests-pipelines | `specs/pipelines/` | `tests/pipelines/` | `e2e` |
+| release-tests-triggers | `specs/triggers/` | `tests/triggers/` | `e2e && !tls` |
+| release-tests-triggers-tls | `specs/triggers/eventlistener.spec` | `tests/triggers/` | `tls && e2e` |
+| release-tests-chains | `specs/chains/` | `tests/chains/` | `e2e` |
+| release-tests-pac | `specs/pac/` | `tests/pac/` | `e2e` |
+| release-tests-pac-github | `specs/pac/pac-github.spec` | `tests/pac/` | `sanity` |
+| release-tests-pac-gitlab | `specs/pac/pac-gitlab.spec` | `tests/pac/` | `sanity` |
+| release-tests-results | `specs/results/` | `tests/results/` | `e2e` |
+| release-tests-metrics | `specs/metrics/` | `tests/metrics/` | `e2e` |
+| release-tests-rbac | `specs/operator/rbac.spec` | `tests/operator/` | `e2e && rbac` |
+| release-tests-addon | `specs/operator/addon.spec` | `tests/operator/` | `e2e && addon` |
+| release-tests-auto-prune | `specs/operator/auto-prune.spec` | `tests/operator/` | `e2e && auto-prune` |
+| release-tests-tekton-pruner | `specs/operator/tekton-pruner.spec` | `tests/operator/` | `e2e && tekton-pruner` |
+| release-tests-manual-approval | `specs/manualapprovalgate/` | `tests/mag/` | `e2e` |
+| release-tests-ecosystem | `specs/ecosystem/ecosystem.spec` | `tests/ecosystem/` | `e2e` |
+| release-tests-ecosystem-multiarch | `specs/ecosystem/ecosystem-multiarch.spec` | `tests/ecosystem/` | `ARCH && e2e` |
+| release-tests-ecosystem-s2i | `specs/ecosystem/ecosystem-s2i.spec` | `tests/ecosystem/` | `e2e && s2i` |
+
+On connected clusters (`IS_DISCONNECTED=false`, the default), `&& !disconnected` is automatically appended to every filter. On disconnected clusters, it is omitted so disconnected-labeled tests also run.
 
 Suites sharing `tests/operator/` are isolated by injecting suite-specific labels (`rbac`, `addon`, `auto-prune`, `tekton-pruner`) via `ginkgo_label_filter()` based on the SPECS parameter.
 
