@@ -1,0 +1,70 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: send-slack-notification
+spec:
+  params:
+    - name: MESSAGE
+      description: Slack markdown; placeholders <icon> <run_status> <logs_url> <cluster_name> <pr_name> <failed_suites>
+    - name: ENABLED
+      description: Must be true/True to post; mirrors SEND_SLACK_NOTIFICATION pipeline param
+      default: "false"
+    - name: SECRET_NAME
+      default: coreos-tektondev-webhook
+    - name: IMAGE
+      default: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+  workspaces:
+    - name: results
+      optional: true
+  steps:
+    - name: post-slack-message
+      image: $(params.IMAGE)
+      env:
+        - name: URL
+          valueFrom:
+            secretKeyRef:
+              name: $(params.SECRET_NAME)
+              key: slack_webhook_url
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        enabled="$(params.ENABLED)"
+        if [[ "$enabled" != true && "$enabled" != True ]]; then
+          echo "SEND_SLACK_NOTIFICATION=false; skipping Slack post"
+          exit 0
+        fi
+
+        pipeline_run_name=$(oc get taskrun "$(context.taskRun.name)" \
+          -o jsonpath='{.metadata.labels.tekton\.dev/pipelineRun}')
+        status=$(oc get pipelinerun "$pipeline_run_name" -o jsonpath='{.status.conditions[0].message}')
+        cluster_name=$(oc get pipelinerun "$pipeline_run_name" \
+          -o jsonpath='{.spec.params[?(@.name=="CLUSTER_NAME")].value}')
+        console_url=$(oc whoami --show-console)
+        logs_url="${console_url}/k8s/ns/$(context.taskRun.namespace)/tekton.dev~v1~PipelineRun/${pipeline_run_name}/logs"
+
+        msg="$(params.MESSAGE)"
+        if [[ "$status" == *"Failed: 0"* ]]; then
+          msg="${msg//<icon>/:rainbow_2:}"
+          msg="${msg//<run_status>/succeeded}"
+        else
+          msg="${msg//<icon>/:volcano:}"
+          msg="${msg//<run_status>/failed}"
+        fi
+
+        failed_suites_msg=""
+        if [[ "$(workspaces.results.bound)" == "true" && -f "$(workspaces.results.path)/results.yaml" ]]; then
+          while IFS= read -r suite; do
+            [[ -n "$suite" ]] && failed_suites_msg="${failed_suites_msg}>• ${suite}\n"
+          done < <(grep fail "$(workspaces.results.path)/results.yaml" | cut -d: -f1 || true)
+          [[ -n "$failed_suites_msg" ]] && failed_suites_msg="\n> Failed suites:\n${failed_suites_msg}"
+        fi
+
+        msg="${msg//<logs_url>/$logs_url}"
+        msg="${msg//<cluster_name>/$cluster_name}"
+        msg="${msg//<pr_name>/$pipeline_run_name}"
+        msg="${msg//<failed_suites>/$failed_suites_msg}"
+
+        curl --no-progress-meter -X POST -H 'Content-Type: application/json' \
+          --data "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"${msg}\"}}]}" \
+          "${URL}"

@@ -1,0 +1,78 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: configure-operator
+spec:
+  workspaces:
+    - name: build-artifacts
+      readOnly: true
+  params:
+    - name: CLUSTER_NAME
+      description: cluster name
+    - name: CATALOG_SOURCE
+      description: provide catalog-source name through which user have to subscribe operator
+      default: custom-operators
+    - name: OPERATOR_ENVIRONMENT
+      description: |
+        Specify p12n operator environment (e.g. prod, stage, pre-stage).
+        This task is not designed for `prod` operator environment
+      default: pre-stage
+  steps:
+    - name: configure-operator
+      env:
+        - name: ADMIN_NAME
+          valueFrom:
+            secretKeyRef:
+              key: admin-name
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: kubeadmin-password
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: admin-token
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: APISERVER
+          valueFrom:
+            secretKeyRef:
+              key: api-url
+              name: cluster-$(params.CLUSTER_NAME)
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          if [[ $(params.OPERATOR_ENVIRONMENT) == "prod" ]]; then
+            echo -e "It's not necessary to apply image content source policy and create a custom operator source in prod."
+            exit 0
+          fi
+
+          ADMIN_NAME=${ADMIN_NAME:-kubeadmin}
+          if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
+            echo "Logging in to cluster $(params.CLUSTER_NAME) as user '$ADMIN_NAME'"
+            oc login -u $ADMIN_NAME -p $ADMIN_PASSWORD $APISERVER --insecure-skip-tls-verify=true
+          elif [[ -n "${ADMIN_TOKEN:-}" ]]; then
+            echo "Logging in to cluster $(params.CLUSTER_NAME) with token"
+            oc login --token=$ADMIN_TOKEN $APISERVER --insecure-skip-tls-verify=true
+          else
+            echo "ERROR: no credentials in cluster secret"; exit 1
+          fi
+
+          echo -e "Creating custom catalog source"
+          oc apply -f $(workspaces.build-artifacts.path)/catalog-source.yaml
+          sleep 30
+
+          echo "Waiting for pods in namespace openshift-marketplace to be ready"
+          pods=$(oc get pods -n openshift-marketplace --sort-by={metadata.creationTimestamp} -o name | \
+          grep $(params.CATALOG_SOURCE) | tail -1)
+
+          for pod in ${pods}; do
+            echo "Waiting for pod $pod in openshift-marketplace to be in ready state"
+            oc wait --for=condition=Ready -n openshift-marketplace $pod --timeout=5m
+          done

@@ -1,0 +1,171 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: evaluate-test-suites
+spec:
+  params:
+    - name: CLUSTER_NAME
+    - name: IMAGE
+      default: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+  workspaces:
+    - name: results
+  results:
+    - name: rerun-command
+  steps:
+    - name: evaluate-test-suites
+      image: $(params.IMAGE)
+      workingDir: $(workspaces.results.path)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        ns="$(context.taskRun.namespace)"
+        tr_name="$(context.taskRun.name)"
+        pr_name=$(oc get taskrun "$tr_name" -n "$ns" -o jsonpath='{.metadata.labels.tekton\.dev/pipelineRun}')
+        pipeline_name=$(oc get taskrun "$tr_name" -n "$ns" -o jsonpath='{.metadata.labels.tekton\.dev/pipeline}')
+        cluster_name="$(params.CLUSTER_NAME)"
+
+        echo "=== Debug: workspace contents ==="
+        ls -la *.result 2>/dev/null || echo "(no .result files found)"
+        echo ""
+
+        rm -f results.yaml
+        passed=() failed=() missing=()
+
+        mapfile -t expected_suites < <(
+          oc get pipelinerun "$pr_name" -n "$ns" -o json \
+            | python3 -c "
+        import json, sys
+        pr = json.load(sys.stdin)
+        for p in pr.get('spec',{}).get('params',[]):
+            if p['name'] == 'TEST_SUITES':
+                val = p.get('value', [])
+                if isinstance(val, list):
+                    for v in val:
+                        print(v)
+                elif isinstance(val, str) and val:
+                    print(val)
+                break
+        "
+        )
+
+        if ((${#expected_suites[@]} == 0)); then
+          echo "WARN: TEST_SUITES param empty; falling back to release-tests-* TaskRuns"
+          mapfile -t expected_suites < <(
+            oc get taskrun -n "$ns" -l "tekton.dev/pipelineRun=${pr_name}" \
+              -o jsonpath='{range .items[*]}{.metadata.labels.tekton\.dev/pipelineTask}{"\n"}{end}' \
+              | grep '^release-tests-' || true
+          )
+        fi
+
+        echo "Expected suites (${#expected_suites[@]}): ${expected_suites[*]}"
+
+        find_result_file() {
+          local suite=$1
+          if [[ -f "${suite}.result" ]]; then
+            echo "${suite}.result"
+            return
+          fi
+          local match
+          match=$(ls -1 *"${suite}"*.result 2>/dev/null | head -1)
+          if [[ -n "$match" ]]; then
+            echo "$match"
+          fi
+        }
+
+        read_result_status() {
+          local file=$1
+          local line
+          line=$(tr -d '\n' < "$file")
+          if [[ "$line" == *": pass" || "$line" == *"=pass" ]]; then
+            echo "pass"
+          elif [[ "$line" == *": fail" || "$line" == *"=fail" ]]; then
+            echo "fail"
+          else
+            echo "unknown"
+          fi
+        }
+
+        taskrun_exit_code() {
+          oc get taskrun -n "$ns" \
+            -l "tekton.dev/pipelineRun=${pr_name},tekton.dev/pipelineTask=$1" \
+            -o jsonpath='{.items[0].status.steps[0].terminated.exitCode}' 2>/dev/null || true
+        }
+
+        for suite in "${expected_suites[@]}"; do
+          [[ -n "$suite" ]] || continue
+
+          result_file=$(find_result_file "$suite")
+
+          if [[ -n "$result_file" ]]; then
+            rs=$(read_result_status "$result_file")
+            content=$(tr -d '\n' < "$result_file")
+            echo "  ${suite}: file=${result_file} content='${content}' status=${rs}"
+            if [[ "$rs" == "pass" ]]; then
+              passed+=("$suite")
+            else
+              failed+=("$suite")
+            fi
+            echo "${suite}: ${rs}" >> results.yaml
+            continue
+          fi
+
+          echo "  ${suite}: no result file found, checking TaskRun exit code"
+          exit_code=$(taskrun_exit_code "$suite")
+
+          if [[ -z "$exit_code" ]]; then
+            missing+=("$suite")
+            echo "${suite}: missing (no .result file, no TaskRun)" >> results.yaml
+            echo "  ${suite}: MISSING — no TaskRun found"
+            continue
+          fi
+
+          if [[ "$exit_code" == "0" ]]; then
+            passed+=("$suite")
+            echo "${suite}: pass (taskrun exit 0)" >> results.yaml
+            echo "  ${suite}: PASS (taskrun exit code 0)"
+          else
+            failed+=("$suite")
+            echo "${suite}: fail (taskrun exit ${exit_code})" >> results.yaml
+            echo "  ${suite}: FAIL (taskrun exit code ${exit_code})"
+          fi
+        done
+
+        echo ""
+        echo "=== Test suite evaluation (pipelinerun/${pr_name}) ==="
+        if ((${#passed[@]})); then
+          echo "Passed (${#passed[@]}):"
+          for s in "${passed[@]}"; do echo "  $s"; done
+        fi
+        if ((${#failed[@]})); then
+          echo "Failed (${#failed[@]}):"
+          for s in "${failed[@]}"; do echo "  $s"; done
+        fi
+        if ((${#missing[@]})); then
+          echo "Missing (${#missing[@]}):"
+          for s in "${missing[@]}"; do echo "  $s"; done
+        fi
+
+        if ((${#failed[@]})); then
+          suites=$(IFS=,; echo "${failed[*]}")
+          rerun="tkn pipeline start ${pipeline_name} --use-pipelinerun ${pr_name} -p CLUSTER_NAME=${cluster_name} -p TEST_SUITES=${suites} -n ${ns}"
+        else
+          rerun="tkn pipeline start ${pipeline_name} --use-pipelinerun ${pr_name} -p CLUSTER_NAME=${cluster_name} -n ${ns}"
+        fi
+
+        echo ""
+        echo "Rerun failed suites:"
+        echo "${rerun}"
+        printf '%s' "$rerun" > "$(results.rerun-command.path)"
+
+        if ((${#failed[@]})); then
+          echo "ERROR: PipelineRun failed — ${#failed[@]} test suite(s) did not pass" >&2
+          exit 1
+        fi
+        if ((${#missing[@]})); then
+          echo "ERROR: PipelineRun failed — ${#missing[@]} expected suite(s) have no result" >&2
+          exit 1
+        fi
+
+        echo "All test suites passed"
+        exit 0

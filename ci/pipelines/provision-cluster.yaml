@@ -1,0 +1,72 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: provision-cluster
+spec:
+  params:
+    - name: INSTALLER
+      description: "Provisioning method: aws-ipi, aro"
+      default: aro
+    - name: CLUSTER_NAME
+      default: aro
+    - name: OPENSHIFT_VERSION
+      description: "OCP version (e.g. 4.20 for ARO, stable-4.19 for aws-ipi)"
+      default: "4.20"
+    - name: BASE_DOMAIN
+      default: aws.ospqa.com
+    - name: AWS_REGION
+      default: us-east-2
+    - name: AZURE_LOCATION
+      default: eastus
+    - name: ARCH
+      default: linux/amd64
+    - name: CLUSTER_LIFETIME
+      default: "6h"
+    - name: KEEP_CLUSTER
+      default: "false"
+  results:
+    - name: cluster-name
+      value: $(tasks.provision.results.cluster-name)
+    - name: api-url
+      value: $(tasks.provision.results.api-url)
+    - name: installer
+      value: $(tasks.provision.results.installer)
+  tasks:
+    - name: provision
+      params:
+        - name: INSTALLER
+          value: $(params.INSTALLER)
+        - name: CLUSTER_NAME
+          value: $(params.CLUSTER_NAME)
+        - name: OPENSHIFT_VERSION
+          value: $(params.OPENSHIFT_VERSION)
+        - name: BASE_DOMAIN
+          value: $(params.BASE_DOMAIN)
+        - name: AWS_REGION
+          value: $(params.AWS_REGION)
+        - name: AZURE_LOCATION
+          value: $(params.AZURE_LOCATION)
+        - name: ARCH
+          value: $(params.ARCH)
+        - name: CLUSTER_LIFETIME
+          value: $(params.CLUSTER_LIFETIME)
+      taskRef:
+        name: provision-cluster
+      timeout: 1h30m
+  finally:
+    - name: destroy-on-failure
+      params:
+        - name: CLUSTER_NAME
+          value: $(tasks.provision.results.cluster-name)
+        - name: KEEP_CLUSTER
+          value: $(params.KEEP_CLUSTER)
+      taskRef:
+        name: destroy-cluster
+      timeout: 30m
+      when:
+        - input: $(tasks.provision.status)
+          operator: in
+          values: ["Failed"]
+        - input: $(params.KEEP_CLUSTER)
+          operator: in
+          values: ["false", "False"]

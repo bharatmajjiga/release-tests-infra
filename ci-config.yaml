@@ -1,0 +1,59 @@
+---
+# Version-to-branch mapping for OpenShift Pipelines components.
+# Used by create-pipelinerun.sh and run-upgrade-tests.sh to auto-resolve
+# CHANNEL and GIT_RELEASE_TESTS_BRANCH from OPERATOR_VERSION.
+#
+# Keys are major.minor (e.g. "1.23"), values contain:
+#   channel:        subscription channel name
+#   release-tests:  gauge release-tests git branch
+#   release-tests-ginkgo:   ginkgo release-tests git branch (optional)
+#
+# Explicit .env values always override ci-config.yaml defaults.
+'1.14':
+  channel: pipelines-1.14
+  release-tests:
+    revision: release-v1.14
+'1.15':
+  channel: pipelines-1.15
+  release-tests:
+    revision: release-v1.15
+'1.16':
+  channel: pipelines-1.16
+  release-tests:
+    revision: release-v1.16
+'1.17':
+  channel: pipelines-1.17
+  release-tests:
+    revision: release-v1.17
+'1.18':
+  channel: pipelines-1.18
+  release-tests:
+    revision: release-v1.18
+'1.19':
+  channel: pipelines-1.19
+  release-tests:
+    revision: release-v1.19
+'1.20':
+  channel: pipelines-1.20
+  release-tests:
+    revision: release-v1.20
+'1.21':
+  channel: pipelines-1.21
+  release-tests:
+    revision: release-v1.21
+'1.22':
+  channel: pipelines-1.22
+  release-tests:
+    revision: release-v1.22
+'1.23':
+  channel: pipelines-1.23
+  release-tests:
+    revision: release-v1.23
+  release-tests-ginkgo:
+    revision: main
+'5.0':
+  channel: pipelines-5.0
+  release-tests:
+    revision: master
+  release-tests-ginkgo:
+    revision: main

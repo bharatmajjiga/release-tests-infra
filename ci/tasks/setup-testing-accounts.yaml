@@ -1,0 +1,84 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: setup-testing-accounts
+spec:
+  workspaces:
+    - name: infra-git
+  params:
+    - name: CLUSTER_NAME
+      type: string
+      description: cluster name
+  steps:
+    - name: setup-testing-accounts
+      env:
+        - name: ADMIN_NAME
+          valueFrom:
+            secretKeyRef:
+              key: admin-name
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: kubeadmin-password
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: admin-token
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: APISERVER
+          valueFrom:
+            secretKeyRef:
+              key: api-url
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      workingDir: $(workspaces.infra-git.path)
+      script: |
+          #!/usr/bin/env bash
+          set -e -u -o pipefail
+
+          if [[ -z "${APISERVER:-}" ]]; then
+            echo "ERROR: secret cluster-$(params.CLUSTER_NAME) not found in namespace (check CLUSTER_NAME / setup-pipelines-ci.sh)"
+            exit 1
+          fi
+
+          ADMIN_NAME=${ADMIN_NAME:-kubeadmin}
+          if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
+            echo "Logging in to cluster $(params.CLUSTER_NAME) as user '$ADMIN_NAME' (kubeadmin)"
+            oc login -u $ADMIN_NAME -p $ADMIN_PASSWORD $APISERVER --insecure-skip-tls-verify=true
+          elif [[ -n "${ADMIN_TOKEN:-}" ]]; then
+            echo "Logging in to cluster $(params.CLUSTER_NAME) with token"
+            oc login --token=$ADMIN_TOKEN $APISERVER --insecure-skip-tls-verify=true
+          else
+            echo "ERROR: no credentials — set kubeadmin-password or admin-token in cluster secret"
+            exit 1
+          fi
+
+          config/auth/01-test-auth.sh
+
+          # Re-login as admin after auth setup (script may have logged in as test user)
+          if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
+            oc login -u $ADMIN_NAME -p $ADMIN_PASSWORD $APISERVER --insecure-skip-tls-verify=true
+          elif [[ -n "${ADMIN_TOKEN:-}" ]]; then
+            oc login --token=$ADMIN_TOKEN $APISERVER --insecure-skip-tls-verify=true
+          fi
+
+          echo -e "\nLogin into cluster using credentials from secret cluster-$(params.CLUSTER_NAME) (kubeadmin-password / admin-token)."
+          echo "Access the OpenShift web-console here: $(oc whoami --show-console)"
+
+          echo -e "Use one of the following users to login:\n"
+          echo "Username           | Password                | Cluster roles "
+          echo "-------------------|-----------------------------------------"
+          echo "$ADMIN_NAME          | (see cluster secret)  | admin"
+          echo "consoledeveloper   | developer               | self-provisioner, view    "
+          echo "pipelinesdeveloper | developer               | basic-user                "
+          echo "user               | user                    | default                   "
+          echo "user1              | user1                   | default                   "
+          echo "...                | ...                     | ...                       "
+          echo "user9              | user9                   | default                   "
+          echo "-------------------------------------------------------------"

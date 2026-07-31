@@ -1,0 +1,350 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: go-mod-cache
+spec:
+  params:
+    - name: TEST_FRAMEWORK
+      default: gauge
+    - name: IMAGE
+      default: quay.io/openshift-pipeline/ci:latest
+    - name: OSP_VERSION
+      default: ""
+    - name: TKN_DOWNLOAD_URL
+      default: ""
+    - name: CLUSTER_NAME
+  workspaces:
+    - name: release-tests-git
+    - name: release-tests-ginkgo-git
+    - name: gomod-cache
+  steps:
+    - name: download
+      image: $(params.IMAGE)
+      env:
+        - name: ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: admin-token
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: kubeadmin-password
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: ADMIN_NAME
+          valueFrom:
+            secretKeyRef:
+              key: admin-name
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: APISERVER
+          valueFrom:
+            secretKeyRef:
+              key: api-url
+              name: cluster-$(params.CLUSTER_NAME)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        # Auto-refresh API token using curl (oc is not yet available at this stage)
+        refresh_api_token() {
+          if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+            _code=$(curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${ADMIN_TOKEN}" "${APISERVER}/api" 2>/dev/null)
+            if [[ "$_code" == "200" ]]; then
+              return 0
+            fi
+            echo "Stored admin-token expired (HTTP ${_code}), re-authenticating..."
+            ADMIN_TOKEN=""
+          fi
+
+          # Use OpenShift OAuth challenge to get a fresh token via curl (no oc needed)
+          if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
+            local user="${ADMIN_NAME:-kubeadmin}"
+            local oauth_route
+            # Discover OAuth server URL from the cluster
+            oauth_route=$(curl -sk "${APISERVER}/.well-known/oauth-authorization-server" 2>/dev/null \
+              | sed -n 's/.*"issuer"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p') || true
+
+            if [[ -z "$oauth_route" ]]; then
+              # Fallback: construct from APISERVER (replace api. with oauth-openshift.apps.)
+              local apps_domain
+              apps_domain=$(echo "$APISERVER" | sed -E 's|https://api\.([^:]+).*|\1|')
+              oauth_route="https://oauth-openshift.apps.${apps_domain}"
+            fi
+
+            for attempt in 1 2 3; do
+              # Request token via OAuth authorize endpoint with basic auth challenge
+              local token_response
+              token_response=$(curl -sk -I -u "${user}:${ADMIN_PASSWORD}" \
+                "${oauth_route}/oauth/authorize?client_id=openshift-challenging-client&response_type=token" \
+                2>/dev/null | grep -i "^location:" | head -1) || true
+
+              if [[ "$token_response" == *"access_token="* ]]; then
+                ADMIN_TOKEN=$(echo "$token_response" | sed -n 's/.*access_token=\([^&]*\).*/\1/p' | tr -d '\r')
+                if [[ -n "$ADMIN_TOKEN" ]]; then
+                  echo "Re-authenticated as ${user} via OAuth (attempt ${attempt})"
+                  # Update cluster secret so subsequent tasks get a valid token
+                  # Uses the management cluster SA token (already in the pod)
+                  local sa_token
+                  sa_token=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null) || true
+                  if [[ -n "$sa_token" ]]; then
+                    local secret_patch="{\"stringData\":{\"admin-token\":\"${ADMIN_TOKEN}\"}}"
+                    local ns
+                    ns=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null) || ns="pipelines-ci"
+                    curl -sk -X PATCH \
+                      -H "Authorization: Bearer ${sa_token}" \
+                      -H "Content-Type: application/merge-patch+json" \
+                      --data "${secret_patch}" \
+                      "https://kubernetes.default.svc/api/v1/namespaces/${ns}/secrets/cluster-$(params.CLUSTER_NAME)" \
+                      > /dev/null 2>&1 \
+                      && echo "Updated cluster secret with fresh token" || true
+                  fi
+                  return 0
+                fi
+              fi
+              echo "  OAuth attempt ${attempt} failed, retrying in 5s..."
+              sleep 5
+            done
+          fi
+
+          echo "WARNING: No valid API token — CLI downloads will use fallback URLs"
+          return 1
+        }
+
+        refresh_api_token || true
+        if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+          echo "Authenticated (token valid)"
+        fi
+
+        pod_arch() {
+          case "$(uname -m)" in aarch64) echo arm64 ;; x86_64) echo amd64 ;; *) uname -m ;; esac
+        }
+
+        resolve_tkn_url() {
+          local url="${1:-}" cli_arch="$2" osp_ver="$3"
+          if [[ -n "$url" ]]; then
+            url="${url/developers.qa.redhat.com/developers.redhat.com}"
+            echo "$url" | sed -E \
+              "s|/content-gateway/rest/browse/pub/cgw/pipelines/([^/]+)/?.*|/content-gateway/file/pub/cgw/pipelines/\1/tkn-linux-${cli_arch}.tar.gz|" \
+              | sed -E "s/tkn-linux-[a-z0-9]+\.tar\.gz/tkn-linux-${cli_arch}.tar.gz/"
+            return
+          fi
+
+          local cluster_url=""
+          if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+            cluster_url=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+              "${APISERVER}/apis/console.openshift.io/v1/consoleclidownloads/tkn" 2>/dev/null \
+              | grep -o "https://[^\"]*tkn-linux-${cli_arch}\\.tar\\.gz" | head -1) || true
+          fi
+          if [[ -z "$cluster_url" && -n "${ADMIN_TOKEN:-}" ]]; then
+            local tkn_host
+            tkn_host=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+              "${APISERVER}/apis/route.openshift.io/v1/namespaces/openshift-pipelines/routes/tkn-cli-serve" 2>/dev/null \
+              | grep -o '"host":"[^"]*"' | head -1 | cut -d'"' -f4) || true
+            [[ -n "$tkn_host" ]] && cluster_url="https://${tkn_host}/tkn/tkn-linux-${cli_arch}.tar.gz"
+          fi
+
+          if [[ -n "$cluster_url" ]]; then
+            echo "$cluster_url"
+          else
+            echo "ERROR: Cannot resolve tkn download URL from cluster — set TKN_DOWNLOAD_URL in .env" >&2
+            return 1
+          fi
+        }
+
+        install_cached_oc() {
+          local tools=$1 cli_arch=$2
+          [[ -x "${tools}/oc" ]] && return 0
+          local url="" is_tar=false
+          # ConsoleCLIDownload serves oc matching the exact cluster version
+          url=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+            "${APISERVER}/apis/console.openshift.io/v1/consoleclidownloads/oc-cli-downloads" 2>/dev/null \
+            | sed -n "s|.*\"href\":[[:space:]]*\"\\([^\"]*/${cli_arch}/linux/oc\\.tar\\)\".*|\\1|p" | head -1) || true
+          if [[ -n "$url" ]]; then
+            is_tar=true
+          else
+            local ver
+            ver=$(curl -sk -H "Authorization: Bearer ${ADMIN_TOKEN:-}" \
+              "${APISERVER}/apis/config.openshift.io/v1/clusterversions/version" \
+              | sed -n 's/.*"version":[[:space:]]*"\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/p' | head -1) || true
+            url="https://mirror.openshift.com/pub/openshift-v4/${cli_arch}/clients/ocp/${ver:-stable}/openshift-client-linux.tar.gz"
+          fi
+          echo "Downloading oc (${cli_arch}) from ${url} → ${tools}"
+          if [[ "$is_tar" == true ]]; then
+            curl -ksSfL "$url" | tar xf - -C "$tools" oc 2>/dev/null || true
+          else
+            curl -ksSfL "$url" | tar xzf - -C "$tools" oc 2>/dev/null || true
+          fi
+          [[ -x "${tools}/oc" ]] && ln -sf oc "${tools}/kubectl" || true
+        }
+
+        install_cached_tkn() {
+          local tools=$1 cli_arch=$2 osp_ver=$3 tkn_url=$4
+          [[ -x "${tools}/tkn" && -x "${tools}/opc" ]] && return 0
+          local url archive tmp jar
+          url=$(resolve_tkn_url "$tkn_url" "$cli_arch" "$osp_ver")
+          archive="/tmp/tkn-linux-${cli_arch}.tar.gz"
+          echo "Downloading tkn/opc from ${url} → ${tools}"
+          tmp="${archive}.part.$$"; jar=$(mktemp)
+          curl -kfsSL -c "$jar" -b "$jar" "$url" -o "$tmp" && rm -f "$jar" && mv "$tmp" "$archive"
+          tar xzf "$archive" -C "$tools" --strip-components=1
+        }
+
+        gomod_hash() {
+          # Key on go.mod only — go.sum can appear or change after clone/go mod download.
+          local repo="${1:-.}"
+          [[ -f "$repo/go.mod" ]] || return 1
+          sha256sum "$repo/go.mod" | sha256sum | awk '{print substr($1,1,12)}'
+        }
+
+        wait_repo_ready() {
+          local repo=$1 last="" cur="" stable="" stable_count=0 i
+          for i in $(seq 1 120); do
+            [[ -f "$repo/go.mod" ]] || { echo "waiting for ${repo}/go.mod (${i}/120)..." >&2; sleep 2; continue; }
+            if [[ ! -d "$repo/vendor" && ! -f "$repo/go.sum" ]]; then
+              echo "waiting for ${repo}/go.sum (${i}/120)..." >&2
+              sleep 2
+              continue
+            fi
+            cur=$(gomod_hash "$repo") || continue
+            if [[ -n "$last" && "$cur" == "$last" ]]; then
+              stable_count=$((stable_count + 1))
+              if [[ $stable_count -ge 3 ]]; then
+                stable=$cur
+                break
+              fi
+            else
+              stable_count=1
+              last=$cur
+            fi
+            echo "waiting for stable go.mod in ${repo} (${stable_count}/3, hash=${cur})..." >&2
+            sleep 3
+          done
+          [[ -n "$stable" ]] || { echo "ERROR: ${repo}/go.mod not stable after clone" >&2; exit 1; }
+          printf '%s' "$stable"
+        }
+
+        populate_cache() {
+          local repo=$1 key=$2 fw=$3 lock="${GOMODCACHE_ROOT}/.lock"
+          local arch
+          arch=$(pod_arch)
+          local gomod="${GOMODCACHE_ROOT}/${key}/gomod"
+          local tools="${GOMODCACHE_ROOT}/${key}/tools-${arch}/bin"
+          local gobuild="${GOMODCACHE_ROOT}/${key}/gobuild-${arch}"
+          mkdir -p "$gomod" "$tools" "$gobuild"
+
+          # Redirect all Go caches to the workspace PVC (avoids /opt/app-root permission issues)
+          export GOMODCACHE="$gomod" GOCACHE="$gobuild" GOPATH="${GOMODCACHE_ROOT}/${key}/gopath-${arch}"
+          mkdir -p "$GOPATH"
+
+          (
+            flock -w 900 9 || { echo "ERROR: gomod lock timeout"; exit 1; }
+            if [[ -f "${gomod}/.ready" && -f "${tools}/.ready" ]]; then
+              echo "cache ready: gomod=${gomod} tools=${tools}"
+              return 0
+            fi
+
+            if [[ -d "$repo/vendor" ]]; then
+              echo "Using vendored dependencies in ${repo}"
+            else
+              echo "go mod download → ${gomod}"
+              (cd "$repo" && go mod download)
+              echo "go build ./... (warm compile deps)"
+              (cd "$repo" && go build -mod=readonly ./...) \
+                || echo "WARN: go build ./... failed; go mod download cache is still usable"
+            fi
+            touch "${gomod}/.ready"
+
+            case "$fw" in
+              ginkgo)
+                if [[ ! -x "${tools}/ginkgo" ]]; then
+                  if command -v ginkgo &>/dev/null; then
+                    echo "copying preinstalled ginkgo → ${tools}"
+                    cp "$(command -v ginkgo)" "${tools}/ginkgo"
+                  else
+                    echo "go install ginkgo → ${tools}"
+                    (cd "$repo" && GOBIN="$tools" \
+                      go install github.com/onsi/ginkgo/v2/ginkgo)
+                  fi
+                fi
+                ;;
+              *)
+                if [[ ! -x "${tools}/gauge" ]]; then
+                  if command -v gauge &>/dev/null; then
+                    echo "copying preinstalled gauge → ${tools}"
+                    cp "$(command -v gauge)" "${tools}/gauge"
+                  else
+                    echo "go install gauge → ${tools}"
+                    GOBIN="$tools" go install github.com/getgauge/gauge@v1.6.25
+                  fi
+                fi
+                local gauge_home="${GOMODCACHE_ROOT}/${key}/gauge-home-${arch}"
+                if [[ ! -f "${gauge_home}/.ready" ]]; then
+                  mkdir -p "$gauge_home/config"
+                  touch "$gauge_home/config/gauge.properties"
+                  export GAUGE_HOME="$gauge_home" PATH="${tools}:${PATH}"
+                  gauge config check_updates false
+                  # gauge-go plugin: prebuilt for amd64/arm64, build from source for ppc64le/s390x
+                  if [[ "$arch" == amd64 || "$arch" == arm64 ]]; then
+                    gauge install go 2>&1 || true
+                  else
+                    echo "Building gauge-go plugin from source for ${arch}..."
+                    local go_plugin_dir="${gauge_home}/plugins/go/0.5.2"
+                    mkdir -p "$go_plugin_dir/bin"
+                    git clone --depth 1 --branch v0.5.2 https://github.com/getgauge-contrib/gauge-go.git /tmp/gauge-go 2>/dev/null
+                    (cd /tmp/gauge-go && go build -o "$go_plugin_dir/bin/gauge-go" ./.) 2>&1
+                    cp /tmp/gauge-go/go.json "$go_plugin_dir/" 2>/dev/null || true
+                    rm -rf /tmp/gauge-go
+                    echo "gauge-go plugin built for ${arch}"
+                  fi
+                  gauge install html-report && gauge install xml-report -v 0.5.3
+                  gauge config runner_connection_timeout 3600000
+                  gauge config runner_request_timeout 3600000
+                  touch "${gauge_home}/.ready"
+                fi
+                ;;
+            esac
+
+            local cli_arch
+            cli_arch=$(pod_arch)
+            install_cached_oc "$tools" "$cli_arch"
+            install_cached_tkn "$tools" "$cli_arch" "$(params.OSP_VERSION)" "$(params.TKN_DOWNLOAD_URL)"
+            touch "${tools}/.ready"
+          ) 9>"$lock"
+        }
+
+        GOMODCACHE_ROOT="$(workspaces.gomod-cache.path)"
+        mkdir -p "$GOMODCACHE_ROOT"
+        fw="$(printf '%s' "$(params.TEST_FRAMEWORK)" | tr '[:upper:]' '[:lower:]')"
+
+        case "$fw" in
+          ginkgo)
+            repo="$(workspaces.release-tests-ginkgo-git.path)"
+            [[ -f "${repo}/go.mod" ]] || { echo "ERROR: ginkgo go.mod missing in ${repo}"; exit 1; }
+            ;;
+          *)
+            fw=gauge
+            repo="$(workspaces.release-tests-git.path)"
+            [[ -f "${repo}/go.mod" ]] || { echo "ERROR: gauge go.mod missing in ${repo}"; exit 1; }
+            ;;
+        esac
+
+        key=$(wait_repo_ready "$repo")
+        [[ "$key" =~ ^[a-f0-9]{12}$ ]] || { echo "ERROR: invalid gomod cache key: ${key}" >&2; exit 1; }
+        echo "framework=${fw} repo=${repo} gomod-hash=${key}"
+
+        rm -f "${GOMODCACHE_ROOT}/.${fw}.cache-key" "${GOMODCACHE_ROOT}/.${fw}.cache-ready"
+        populate_cache "$repo" "$key" "$fw"
+
+        final=$(gomod_hash "$repo")
+        if [[ "$final" != "$key" ]]; then
+          echo "WARN: go.mod hash changed during populate (${key} -> ${final}); repopulating"
+          key=$final
+          populate_cache "$repo" "$key" "$fw"
+        fi
+
+        printf '%s' "$key" > "${GOMODCACHE_ROOT}/.${fw}.cache-key"
+        touch "${GOMODCACHE_ROOT}/.${fw}.cache-ready"
+        echo "Shared cache populated for all test TaskRuns: ${GOMODCACHE_ROOT}/${key}/"

@@ -1,0 +1,1420 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: upgrade-tests
+spec:
+  params:
+  # --- Cluster provisioning ---
+  - name: INSTALLER
+    description: "Provisioning method: aws-ipi, cluster-platforms, none"
+    default: aws-ipi
+  - name: BASE_DOMAIN
+    default: aws.ospqa.com
+  - name: AWS_REGION
+    default: us-east-2
+  - name: OPENSHIFT_VERSION
+    description: "OCP version to provision (e.g. stable-4.19, 4.19.3)"
+    default: stable
+  - name: KEEP_CLUSTER
+    description: Skip cluster destruction when true
+    default: "false"
+  - name: CLUSTER_LIFETIME
+    description: Tag for orphan cleanup (e.g. 6h)
+    default: "6h"
+  - name: CLUSTER_NAME
+    description: "Cluster name prefix (aws-ipi) or existing cluster name (cluster-platforms/none)"
+    default: upgrd
+
+  # --- Common ---
+  - name: ARCH
+    default: "linux/amd64"
+  - name: GIT_INFRA_URI
+    default: https://github.com/openshift-pipelines/release-tests-infra.git
+  - name: GIT_INFRA_BRANCH
+    default: main
+  - name: GIT_RELEASE_TESTS_URI
+    default: https://github.com/openshift-pipelines/release-tests.git
+  - name: GIT_RELEASE_TESTS_BRANCH
+    default: ""
+  - name: GIT_RELEASE_TESTS_GINKGO_URI
+    default: https://github.com/openshift-pipelines/release-tests-ginkgo.git
+  - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+    default: ""
+  - name: TEST_FRAMEWORK
+    description: gauge or ginkgo
+    default: gauge
+  - name: IMAGE
+    default: quay.io/openshift-pipeline/ci:latest
+  - name: TKN_DOWNLOAD_URL
+    default: ""
+  - name: TAGS
+    default: "e2e"
+  - name: TEST_SUITES
+    type: array
+    default:
+      - release-tests-pre-upgrade
+      - release-tests-post-upgrade
+      - release-tests-versions
+      - release-tests-pipelines
+      - release-tests-triggers
+      - release-tests-triggers-tls
+      - release-tests-chains
+      - release-tests-pac
+      - release-tests-results
+      - release-tests-metrics
+      - release-tests-rbac
+      - release-tests-addon
+      - release-tests-auto-prune
+      - release-tests-tekton-pruner
+      - release-tests-manual-approval
+      - release-tests-ecosystem
+
+  # --- Pre-upgrade operator ---
+  - name: PRE_UPGRADE_VERSION
+    description: Pipelines operator version installed first (x.y.z)
+  - name: PRE_UPGRADE_OPERATOR_ENVIRONMENT
+    default: prod
+  - name: PRE_UPGRADE_CATALOG_SOURCE
+    default: redhat-operators
+  - name: PRE_UPGRADE_KONFLUX_INDEX_IMAGE
+    default: ""
+  - name: PRE_UPGRADE_CHANNEL
+    description: "OLM channel for pre-upgrade (auto-derived if empty)"
+    default: ""
+
+  # --- Upgrade operator ---
+  - name: UPGRADE_VERSION
+    description: Pipelines operator version to upgrade to (x.y.z)
+  - name: UPGRADE_OPERATOR_ENVIRONMENT
+    default: pre-stage
+  - name: UPGRADE_CATALOG_SOURCE
+    default: custom-operators
+  - name: UPGRADE_KONFLUX_INDEX_IMAGE
+    default: ""
+  - name: UPGRADE_CHANNEL
+    description: "OLM channel for upgrade (auto-derived if empty)"
+    default: ""
+
+  # --- Post-test ---
+  - name: INSTALL_PIPELINES_OPERATOR
+    description: Install operator before upgrade (default true for upgrade tests)
+    default: "true"
+  - name: UNINSTALL_PIPELINES_OPERATOR
+    default: "false"
+  - name: POST_TEST_IMAGE
+    default: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+  - name: SEND_SLACK_NOTIFICATION
+    default: "false"
+
+  workspaces:
+  - name: data
+
+  tasks:
+  # ============================================================
+  # Phase 1: Provision cluster (aws-ipi) or skip (existing)
+  # ============================================================
+  - name: provision-cluster
+    params:
+      - name: CLUSTER_NAME
+        value: $(params.CLUSTER_NAME)
+      - name: INSTALLER
+        value: $(params.INSTALLER)
+      - name: BASE_DOMAIN
+        value: $(params.BASE_DOMAIN)
+      - name: AWS_REGION
+        value: $(params.AWS_REGION)
+      - name: OPENSHIFT_VERSION
+        value: $(params.OPENSHIFT_VERSION)
+      - name: ARCH
+        value: $(params.ARCH)
+      - name: CLUSTER_LIFETIME
+        value: $(params.CLUSTER_LIFETIME)
+    taskRef:
+      name: provision-cluster
+    timeout: 60m
+
+  # ============================================================
+  # Clone repos (parallel, after provision)
+  # ============================================================
+  - name: clone-infra-git
+    params:
+      - name: URL
+        value: $(params.GIT_INFRA_URI)
+      - name: DELETE_EXISTING
+        value: "true"
+      - name: REVISION
+        value: $(params.GIT_INFRA_BRANCH)
+    runAfter:
+      - provision-cluster
+    taskRef:
+      resolver: cluster
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: git-clone
+      - name: namespace
+        value: openshift-pipelines
+    timeout: 10m
+    workspaces:
+    - name: output
+      workspace: data
+      subPath: infra-git
+
+  - name: clone-release-tests-git
+    runAfter:
+      - provision-cluster
+    params:
+      - name: URL
+        value: $(params.GIT_RELEASE_TESTS_URI)
+      - name: DELETE_EXISTING
+        value: "true"
+      - name: REVISION
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+    taskRef:
+      resolver: cluster
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: git-clone
+      - name: namespace
+        value: openshift-pipelines
+    timeout: 10m
+    when:
+      - input: $(params.TEST_FRAMEWORK)
+        operator: in
+        values: ["gauge", "Gauge", "GAUGE", ""]
+    workspaces:
+    - name: output
+      workspace: data
+      subPath: release-tests-git
+
+  - name: clone-release-tests-ginkgo-git
+    runAfter:
+      - provision-cluster
+    params:
+      - name: URL
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_URI)
+      - name: DELETE_EXISTING
+        value: "true"
+      - name: REVISION
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+    taskRef:
+      resolver: cluster
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: git-clone
+      - name: namespace
+        value: openshift-pipelines
+    timeout: 10m
+    when:
+      - input: $(params.TEST_FRAMEWORK)
+        operator: in
+        values: ["ginkgo", "Ginkgo", "GINKGO"]
+    workspaces:
+    - name: output
+      workspace: data
+      subPath: release-tests-ginkgo-git
+
+  # ============================================================
+  # Setup + go-mod-cache (parallel)
+  # ============================================================
+  - name: setup-testing-accounts
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+    runAfter:
+      - clone-infra-git
+    taskRef:
+      name: setup-testing-accounts
+    workspaces:
+    - name: infra-git
+      workspace: data
+      subPath: infra-git
+
+  - name: go-mod-cache-gauge
+    params:
+      - name: OSP_VERSION
+        value: $(params.PRE_UPGRADE_VERSION)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: gauge
+    runAfter:
+      - setup-testing-accounts
+    taskRef:
+      name: go-mod-cache
+    timeout: 30m
+    when:
+      - input: $(params.TEST_FRAMEWORK)
+        operator: in
+        values: ["gauge", "Gauge", "GAUGE", ""]
+    workspaces:
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+
+  - name: go-mod-cache-ginkgo
+    params:
+      - name: OSP_VERSION
+        value: $(params.PRE_UPGRADE_VERSION)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: ginkgo
+    runAfter:
+      - setup-testing-accounts
+    taskRef:
+      name: go-mod-cache
+    timeout: 30m
+    when:
+      - input: $(params.TEST_FRAMEWORK)
+        operator: in
+        values: ["ginkgo", "Ginkgo", "GINKGO"]
+    workspaces:
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+
+  # ============================================================
+  # Phase 2: Pre-upgrade — install operator at PRE_UPGRADE_VERSION
+  # ============================================================
+  - name: generate-build-artifacts-pre-upgrade
+    params:
+      - name: CATALOG_SOURCE
+        value: $(params.PRE_UPGRADE_CATALOG_SOURCE)
+      - name: KONFLUX_INDEX_IMAGE
+        value: $(params.PRE_UPGRADE_KONFLUX_INDEX_IMAGE)
+      - name: OPERATOR_ENVIRONMENT
+        value: $(params.PRE_UPGRADE_OPERATOR_ENVIRONMENT)
+    runAfter:
+      - clone-infra-git
+    taskRef:
+      name: generate-build-artifacts
+    when:
+      - input: $(params.PRE_UPGRADE_OPERATOR_ENVIRONMENT)
+        operator: notin
+        values: ["prod"]
+      - input: $(params.PRE_UPGRADE_CATALOG_SOURCE)
+        operator: notin
+        values: ["redhat-operators"]
+    workspaces:
+      - name: build-artifacts
+        workspace: data
+        subPath: build-artifacts
+
+  - name: configure-operator-pre-upgrade
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: CATALOG_SOURCE
+        value: $(params.PRE_UPGRADE_CATALOG_SOURCE)
+      - name: OPERATOR_ENVIRONMENT
+        value: $(params.PRE_UPGRADE_OPERATOR_ENVIRONMENT)
+    taskRef:
+      name: configure-operator
+    runAfter:
+      - generate-build-artifacts-pre-upgrade
+      - setup-testing-accounts
+    when:
+      - input: $(params.PRE_UPGRADE_OPERATOR_ENVIRONMENT)
+        operator: notin
+        values: ["prod"]
+      - input: $(params.PRE_UPGRADE_CATALOG_SOURCE)
+        operator: notin
+        values: ["redhat-operators"]
+    workspaces:
+      - name: build-artifacts
+        workspace: data
+        subPath: build-artifacts
+
+  - name: install-pipelines-operator
+    params:
+      - name: ARCH
+        value: $(params.ARCH)
+      - name: CATALOG_SOURCE
+        value: $(params.PRE_UPGRADE_CATALOG_SOURCE)
+      - name: CHANNEL
+        value: $(params.PRE_UPGRADE_CHANNEL)
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: FAIL_ON_ERROR
+        value: "True"
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.PRE_UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/olm.spec"
+      - name: TAGS
+        value: "install"
+    runAfter:
+      - clone-release-tests-git
+      - clone-release-tests-ginkgo-git
+      - configure-operator-pre-upgrade
+      - go-mod-cache-gauge
+      - go-mod-cache-ginkgo
+    taskRef:
+      name: release-tests
+    retries: 2
+    timeout: 30m
+    when:
+      - input: $(params.INSTALL_PIPELINES_OPERATOR)
+        operator: in
+        values: ["true", "True"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  # ============================================================
+  # Pre-upgrade tests
+  # ============================================================
+  - name: release-tests-pre-upgrade
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.PRE_UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/operator/pre-upgrade.spec"
+      - name: TAGS
+        value: "pre-upgrade"
+    runAfter:
+      - install-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-pre-upgrade
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  # ============================================================
+  # Phase 3: Upgrade operator to UPGRADE_VERSION
+  # ============================================================
+  - name: generate-build-artifacts-upgrade
+    params:
+      - name: CATALOG_SOURCE
+        value: $(params.UPGRADE_CATALOG_SOURCE)
+      - name: KONFLUX_INDEX_IMAGE
+        value: $(params.UPGRADE_KONFLUX_INDEX_IMAGE)
+      - name: OPERATOR_ENVIRONMENT
+        value: $(params.UPGRADE_OPERATOR_ENVIRONMENT)
+    runAfter:
+      - release-tests-pre-upgrade
+    taskRef:
+      name: generate-build-artifacts
+    when:
+      - input: $(params.UPGRADE_OPERATOR_ENVIRONMENT)
+        operator: notin
+        values: ["prod"]
+      - input: $(params.UPGRADE_CATALOG_SOURCE)
+        operator: notin
+        values: ["redhat-operators"]
+    workspaces:
+      - name: build-artifacts
+        workspace: data
+        subPath: build-artifacts
+
+  - name: configure-operator-upgrade
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: CATALOG_SOURCE
+        value: $(params.UPGRADE_CATALOG_SOURCE)
+      - name: OPERATOR_ENVIRONMENT
+        value: $(params.UPGRADE_OPERATOR_ENVIRONMENT)
+    taskRef:
+      name: configure-operator
+    runAfter:
+      - generate-build-artifacts-upgrade
+    when:
+      - input: $(params.UPGRADE_OPERATOR_ENVIRONMENT)
+        operator: notin
+        values: ["prod"]
+      - input: $(params.UPGRADE_CATALOG_SOURCE)
+        operator: notin
+        values: ["redhat-operators"]
+    workspaces:
+      - name: build-artifacts
+        workspace: data
+        subPath: build-artifacts
+
+  - name: update-pipelines-operator
+    params:
+      - name: ARCH
+        value: $(params.ARCH)
+      - name: CATALOG_SOURCE
+        value: $(params.UPGRADE_CATALOG_SOURCE)
+      - name: CHANNEL
+        value: $(params.UPGRADE_CHANNEL)
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: FAIL_ON_ERROR
+        value: "True"
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/olm.spec"
+      - name: TAGS
+        value: "install"
+    runAfter:
+      - configure-operator-upgrade
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  # ============================================================
+  # Phase 4: Post-upgrade tests (parallel suites)
+  # ============================================================
+  - name: release-tests-post-upgrade
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/operator/post-upgrade.spec"
+      - name: TAGS
+        value: "post-upgrade"
+    runAfter:
+      - update-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-post-upgrade
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  - name: release-tests-versions
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/versions.spec"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter:
+      - update-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-versions
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  - name: release-tests-pipelines
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "non-admin"
+      - name: SPECS
+        value: "specs/pipelines/"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter:
+      - update-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-pipelines
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  - name: release-tests-triggers
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "non-admin"
+      - name: SPECS
+        value: "specs/triggers/"
+      - name: TAGS
+        value: "$(params.TAGS) & !tls"
+    runAfter:
+      - update-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 1h
+    when:
+      - input: release-tests-triggers
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  - name: release-tests-triggers-tls
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/triggers/eventlistener.spec"
+      - name: TAGS
+        value: "tls & $(params.TAGS)"
+    runAfter:
+      - update-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 1h
+    when:
+      - input: release-tests-triggers-tls
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  - name: release-tests-chains
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/chains/"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter:
+      - update-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-chains
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  - name: release-tests-pac
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/pac/"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter:
+      - update-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-pac
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  - name: release-tests-results
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/results/"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter:
+      - update-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-results
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  - name: release-tests-metrics
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/metrics/"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter:
+      - update-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-metrics
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  - name: release-tests-rbac
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/operator/rbac.spec"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter:
+      - update-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 1h
+    when:
+      - input: release-tests-rbac
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  - name: release-tests-addon
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: ARCH
+        value: $(params.ARCH)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/operator/addon.spec"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter:
+      - update-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 1h
+    when:
+      - input: release-tests-addon
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  # Sequential suites — run after all parallel post-upgrade tests complete
+  - name: release-tests-auto-prune
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/operator/auto-prune.spec"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter:
+      - release-tests-post-upgrade
+      - release-tests-versions
+      - release-tests-pipelines
+      - release-tests-triggers
+      - release-tests-triggers-tls
+      - release-tests-chains
+      - release-tests-pac
+      - release-tests-results
+      - release-tests-metrics
+      - release-tests-rbac
+      - release-tests-addon
+      - release-tests-manual-approval
+      - release-tests-ecosystem
+    taskRef:
+      name: release-tests
+    timeout: 1h30m
+    when:
+      - input: release-tests-auto-prune
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+  - name: release-tests-tekton-pruner
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/operator/tekton-pruner.spec"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter:
+      - release-tests-auto-prune
+    taskRef:
+      name: release-tests
+    timeout: 1h30m
+    when:
+      - input: release-tests-tekton-pruner
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  - name: release-tests-manual-approval
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/manualapprovalgate/"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter:
+      - update-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: release-tests-manual-approval
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  - name: release-tests-ecosystem
+    onError: continue
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/ecosystem/ecosystem.spec"
+      - name: TAGS
+        value: $(params.TAGS)
+    runAfter:
+      - update-pipelines-operator
+    taskRef:
+      name: release-tests
+    timeout: 1h
+    when:
+      - input: release-tests-ecosystem
+        operator: in
+        values: ["$(params.TEST_SUITES[*])"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  # ============================================================
+  # Evaluate + optional uninstall
+  # ============================================================
+  - name: evaluate-test-suites
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: IMAGE
+        value: $(params.POST_TEST_IMAGE)
+    runAfter:
+      - release-tests-post-upgrade
+      - release-tests-versions
+      - release-tests-pipelines
+      - release-tests-triggers
+      - release-tests-triggers-tls
+      - release-tests-chains
+      - release-tests-pac
+      - release-tests-results
+      - release-tests-metrics
+      - release-tests-rbac
+      - release-tests-addon
+      - release-tests-auto-prune
+      - release-tests-tekton-pruner
+      - release-tests-manual-approval
+      - release-tests-ecosystem
+    taskRef:
+      name: evaluate-test-suites
+    workspaces:
+      - name: results
+        workspace: data
+        subPath: results
+
+  - name: uninstall-pipelines-operator
+    onError: continue
+    params:
+      - name: ARCH
+        value: $(params.ARCH)
+      - name: CATALOG_SOURCE
+        value: $(params.UPGRADE_CATALOG_SOURCE)
+      - name: CHANNEL
+        value: $(params.UPGRADE_CHANNEL)
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: FAIL_ON_ERROR
+        value: "True"
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TKN_DOWNLOAD_URL
+        value: $(params.TKN_DOWNLOAD_URL)
+      - name: OSP_VERSION
+        value: $(params.UPGRADE_VERSION)
+      - name: GIT_RELEASE_TESTS_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_BRANCH)
+      - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
+        value: $(params.GIT_RELEASE_TESTS_GINKGO_BRANCH)
+      - name: TEST_FRAMEWORK
+        value: $(params.TEST_FRAMEWORK)
+      - name: RUN_AS
+        value: "admin"
+      - name: SPECS
+        value: "specs/olm.spec"
+      - name: TAGS
+        value: "uninstall"
+    runAfter:
+      - evaluate-test-suites
+    taskRef:
+      name: release-tests
+    timeout: 30m
+    when:
+      - input: $(params.UNINSTALL_PIPELINES_OPERATOR)
+        operator: in
+        values: ["true", "True"]
+    workspaces:
+    - name: release-tests-git
+      workspace: data
+      subPath: release-tests-git
+    - name: release-tests-ginkgo-git
+      workspace: data
+      subPath: release-tests-ginkgo-git
+    - name: gomod-cache
+      workspace: data
+      subPath: gomod-cache
+    - name: results
+      workspace: data
+      subPath: results
+
+  # ============================================================
+  # Finally: destroy cluster + slack + cleanup
+  # ============================================================
+  finally:
+    - name: upload-artifacts-gcs
+      onError: continue
+      timeout: 10m
+      params:
+        - name: PIPELINE_RUN_NAME
+          value: $(context.pipelineRun.name)
+        - name: OPERATOR_VERSION
+          value: $(params.UPGRADE_VERSION)
+      taskRef:
+        name: upload-artifacts-gcs
+      workspaces:
+        - name: results
+          workspace: data
+          subPath: results
+
+    - name: destroy-cluster
+      onError: continue
+      timeout: 30m
+      params:
+        - name: CLUSTER_NAME
+          value: $(tasks.provision-cluster.results.cluster-name)
+        - name: KEEP_CLUSTER
+          value: $(params.KEEP_CLUSTER)
+        - name: ARCH
+          value: $(params.ARCH)
+      taskRef:
+        name: destroy-cluster
+
+    - name: send-slack-notification
+      onError: continue
+      params:
+        - name: IMAGE
+          value: $(params.POST_TEST_IMAGE)
+        - name: ENABLED
+          value: $(params.SEND_SLACK_NOTIFICATION)
+        - name: MESSAGE
+          value: |
+            <icon> upgrade-tests <pr_name> *<run_status>* <icon> <<logs_url>|logs> <failed_suites>
+      taskRef:
+        name: send-slack-notification
+      when:
+        - input: $(params.SEND_SLACK_NOTIFICATION)
+          operator: in
+          values: ["true", "True"]
+      workspaces:
+        - name: results
+          workspace: data
+          subPath: results
+
+    - name: cleanup-pipelinerun
+      onError: continue
+      timeout: 10m
+      params:
+        - name: PIPELINE_RUN
+          value: $(context.pipelineRun.name)
+        - name: DELETE_DELAY
+          value: "300"
+      taskRef:
+        name: cleanup-pipelinerun
