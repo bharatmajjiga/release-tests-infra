@@ -471,6 +471,7 @@ spec:
 
         run_ginkgo() {
           local tags="$1" path filter timeout="${GINKGO_TIMEOUT:-4h}"
+          local log="${report_path}/ginkgo.log"
           path=$(ginkgo_test_path)
           filter=$(ginkgo_label_filter "$tags")
           prepare_ginkgo_ecosystem_s2i "$(params.SPECS)"
@@ -496,7 +497,7 @@ spec:
             ginkgo run \
             --procs=1 \
             --label-filter="$filter" --timeout="$timeout" --junit-report=junit-report.xml \
-            --output-dir="${report_path}" --randomize-all -v "$path"
+            --output-dir="${report_path}" --randomize-all -v "$path" 2>&1 | tee "$log"
         }
 
         save_results() {
@@ -512,9 +513,12 @@ spec:
             ginkgo)
               [[ -f "${report_path}/junit-report.xml" ]] && \
                 cp "${report_path}/junit-report.xml" "$(workspaces.results.path)/${taskRunName}.xml"
+              [[ -f "${report_path}/ginkgo.log" ]] && \
+                cp "${report_path}/ginkgo.log" "$(workspaces.results.path)/${taskRunName}.log"
               local glog
               for glog in "${report_path}"/*.log "${report_path}"/ginkgo*.out; do
                 [[ -f "$glog" ]] || continue
+                [[ "$(basename "$glog")" == "ginkgo.log" ]] && continue
                 cp "$glog" "$(workspaces.results.path)/${taskRunName}-$(basename "$glog")"
               done
               ;;
