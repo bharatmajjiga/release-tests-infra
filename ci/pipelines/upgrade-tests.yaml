@@ -419,10 +419,14 @@ spec:
   - name: release-tests-pre-upgrade
     onError: continue
     params:
+      - name: CATALOG_SOURCE
+        value: $(params.PRE_UPGRADE_CATALOG_SOURCE)
       - name: CLUSTER_NAME
         value: $(tasks.provision-cluster.results.cluster-name)
       - name: IMAGE
         value: $(params.IMAGE)
+      - name: OPERATOR_ENVIRONMENT
+        value: $(params.PRE_UPGRADE_OPERATOR_ENVIRONMENT)
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
@@ -568,10 +572,14 @@ spec:
   - name: release-tests-post-upgrade
     onError: continue
     params:
+      - name: CATALOG_SOURCE
+        value: $(params.UPGRADE_CATALOG_SOURCE)
       - name: CLUSTER_NAME
         value: $(tasks.provision-cluster.results.cluster-name)
       - name: IMAGE
         value: $(params.IMAGE)
+      - name: OPERATOR_ENVIRONMENT
+        value: $(params.UPGRADE_OPERATOR_ENVIRONMENT)
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
@@ -614,10 +622,14 @@ spec:
   - name: release-tests-versions
     onError: continue
     params:
+      - name: CATALOG_SOURCE
+        value: $(params.UPGRADE_CATALOG_SOURCE)
       - name: CLUSTER_NAME
         value: $(tasks.provision-cluster.results.cluster-name)
       - name: IMAGE
         value: $(params.IMAGE)
+      - name: OPERATOR_ENVIRONMENT
+        value: $(params.UPGRADE_OPERATOR_ENVIRONMENT)
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION

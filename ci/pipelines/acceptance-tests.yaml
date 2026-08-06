@@ -396,10 +396,14 @@ spec:
   - name: release-tests-versions
     onError: continue
     params:
+      - name: CATALOG_SOURCE
+        value: $(params.CATALOG_SOURCE)
       - name: CLUSTER_NAME
         value: $(tasks.provision-cluster.results.cluster-name)
       - name: IMAGE
         value: $(params.IMAGE)
+      - name: OPERATOR_ENVIRONMENT
+        value: $(params.OPERATOR_ENVIRONMENT)
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
