@@ -26,6 +26,9 @@ spec:
     default: "false"
   - name: JIB_MAVEN_REPOSITORY
     default: "quay.io/openshift-pipeline/jib-maven"
+  - name: OPERATOR_ENVIRONMENT
+    description: "Operator environment (pre-stage, stage, prod) — controls which catalog is used for OLM skipRange validation"
+    default: ""
   - name: OSP_VERSION
     default: ""
   - name: RUN_AS
@@ -593,6 +596,7 @@ spec:
         export ADMIN_NAME=${ADMIN_NAME:-kubeadmin} USER_PASSWORD=${USER_PASSWORD:-user}
         export KUBECONFIG=$HOME/.kube/config OSP_VERSION="${OSP_VER}"
         export CHAINS_REPOSITORY="$(params.CHAINS_REPOSITORY)" JIB_MAVEN_REPOSITORY="$(params.JIB_MAVEN_REPOSITORY)"
+        export OPERATOR_ENVIRONMENT="$(params.OPERATOR_ENVIRONMENT)"
 
         check_pac_secrets
 
