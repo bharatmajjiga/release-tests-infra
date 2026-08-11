@@ -2,6 +2,20 @@
 
 CI infrastructure for OpenShift Pipelines acceptance and upgrade tests. Runs on any cluster (amd64, arm64, ppc64le, s390x).
 
+## Quick Start
+
+```bash
+cp env/env.template env/.env.acceptance   # fill in cluster creds + operator version
+ENV_FILE=env/.env.acceptance ./scripts/run-workflow.sh
+```
+
+Or with a per-operation env file:
+
+```bash
+ENV_FILE=env/.env.acceptance ./scripts/run-workflow.sh
+ENV_FILE=env/.env.acceptance-ui ./scripts/run-ui-workflow.sh
+ENV_FILE=env/.env.upgrade   ./scripts/run-upgrade-tests.sh
+```
 
 ## Prerequisites
 
@@ -28,7 +42,7 @@ Required for acceptance and upgrade tests on an existing cluster:
 
 ## Configuration
 
-All values live in `env/env.template`, copied to `env/.env.acceptance` or `env/.env.upgrade`. Pass the file with `ENV_FILE=` when running scripts. Key variables:
+All values live in `env/env.template` (or `env/env.acceptance-ui.template` for UI tests), copied to `env/.env.acceptance`, `env/.env.acceptance-ui`, or `env/.env.upgrade`. Pass the file with `ENV_FILE=` when running scripts. Key variables:
 
 | Variable | Description |
 |----------|-------------|
@@ -72,6 +86,27 @@ This:
 2. `setup-pipelines-ci.sh` — namespace, cluster secret, Tekton tasks + pipelines
 3. `run-upgrade-tests.sh` — submits the `upgrade-tests` PipelineRun
 
+## Running UI acceptance tests
+
+Copy `env/env.acceptance-ui.template` to `env/.env.acceptance-ui`, fill in cluster creds, operator version, and UI markers, then run:
+
+```bash
+cp env/env.acceptance-ui.template env/.env.acceptance-ui
+ENV_FILE=env/.env.acceptance-ui ./scripts/run-ui-workflow.sh
+```
+
+This:
+
+1. `create-secrets.sh` — K8s secrets from `ENV_FILE` or Vault
+2. `setup-pipelines-ci.sh` — namespace, cluster secret, Tekton tasks + pipelines
+3. `create-pipelinerun-ui.sh` — submits the `acceptance-ui-tests` PipelineRun
+
+Or PipelineRun only (after setup):
+
+```bash
+ENV_FILE=env/.env.acceptance-ui ./scripts/hack/create-pipelinerun-ui.sh
+```
+
 ## Test Suite Isolation
 
 Each suite maps to a ginkgo test directory and label filter:
@@ -103,7 +138,9 @@ Suites sharing `tests/operator/` are isolated by injecting suite-specific labels
 
 ### ci-config.yaml
 
-Maps operator versions to subscription channels and git branches. When `CHANNEL` or `GIT_RELEASE_TESTS_BRANCH` are empty, they are auto-resolved:
+Maps versions to subscription channels and git branches.
+
+**OSP (`OPERATOR_VERSION`)** — `create-pipelinerun.sh` auto-resolves `CHANNEL` and `GIT_RELEASE_TESTS_BRANCH` when empty:
 
 ```yaml
 '1.23':
@@ -112,6 +149,14 @@ Maps operator versions to subscription channels and git branches. When `CHANNEL`
     revision: release-v1.23
   release-tests-ginkgo:
     revision: main
+```
+
+**OCP (cluster version)** — `create-pipelinerun-ui.sh` auto-resolves `GIT_UI_TESTS_BRANCH` from `OPENSHIFT_VERSION` (e.g. `4.22`) or `oc get clusterversion`, when empty:
+
+```yaml
+'4.22':
+  release-ui-tests:
+    revision: release-v4.22
 ```
 
 ## Secrets
@@ -134,6 +179,14 @@ Test results are uploaded to GCS in the pipeline's `finally` block.
 ```
 https://storage.googleapis.com/<bucket>/CI/<version>/<pipelinerun>/index.html
 ```
+
+Setup: `./scripts/hack/setup-gcs-artifacts.sh`
+Verify: `./scripts/hack/setup-gcs-artifacts.sh --verify`
+
+| Variable | Default |
+|----------|---------|
+| `GCS_PROJECT` | `pipelines-qe` |
+| `GCS_BUCKET` | `ospqa-ci-artifacts` |
 
 ## Multi-arch
 
