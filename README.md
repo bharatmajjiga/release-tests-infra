@@ -5,7 +5,7 @@ CI infrastructure for OpenShift Pipelines acceptance and upgrade tests. Runs on 
 ## Quick Start
 
 ```bash
-cp env.template .env    # fill in cluster creds + operator version
+cp env/env.template env/.env    # fill in cluster creds + operator version
 ./scripts/run-workflow.sh
 ```
 
@@ -25,17 +25,17 @@ ENV_FILE=env/.env.upgrade   ./scripts/run-upgrade-tests.sh
 | `jq` | JSON processing |
 | `vault` (optional) | Credential management (`CRED_SOURCE=vault`) |
 
-Cluster access: `KUBEADMIN_PASSWORD` + `APISERVER` in `.env`, or `OC_TOKEN` + `CLUSTER_CA_CERT` for `INSTALLER=cluster-platforms`.
+Cluster access: `KUBEADMIN_PASSWORD` + `APISERVER` in `env/.env`, or `OC_TOKEN` + `CLUSTER_CA_CERT` for `INSTALLER=cluster-platforms`.
 
 ## Workflow
 
 ```
-.env / env/.env.acceptance / env/.env.upgrade
+env/.env / env/.env.acceptance / env/.env.upgrade
       │
       ▼
 scripts/run-workflow.sh  (acceptance)
 scripts/run-upgrade-tests.sh  (upgrade)
-  1. create-secrets.sh     — K8s secrets from .env or Vault
+  1. create-secrets.sh     — K8s secrets from env/.env or Vault
   2. setup-pipelines-ci.sh — namespace, cluster secret, Tekton tasks + pipelines
   3. create-pipelinerun.sh — submits PipelineRun (acceptance)
      run-upgrade-tests.sh  — submits PipelineRun (upgrade)
@@ -104,7 +104,7 @@ Suites sharing `tests/operator/` are isolated by injecting suite-specific labels
 
 ## Configuration
 
-All values live in `env.template` / `.env`. Key variables:
+All values live in `env/env.template` / `env/.env`. Key variables:
 
 | Variable | Description |
 |----------|-------------|
@@ -116,7 +116,7 @@ All values live in `env.template` / `.env`. Key variables:
 | `TEST_FRAMEWORK` | `gauge` or `ginkgo` |
 | `TAGS` | Label filter (e.g. `e2e`, `sanity`) |
 | `TEST_SUITES` | Comma-separated list of suites to run |
-| `CRED_SOURCE` | `local` (from .env) or `vault` (from Vault) |
+| `CRED_SOURCE` | `local` (from env/.env) or `vault` (from Vault) |
 
 ### ci-config.yaml
 
@@ -137,7 +137,7 @@ Maps operator versions to subscription channels and git branches. When `CHANNEL`
 # From Vault (recommended)
 CRED_SOURCE=vault ./scripts/hack/create-secrets.sh
 
-# From .env variables
+# From env/.env variables
 CRED_SOURCE=local ./scripts/hack/create-secrets.sh
 
 # First-time Vault login
@@ -193,7 +193,7 @@ release-tests-infra/
 │   ├── run-workflow.sh               # Acceptance tests entry point
 │   ├── run-upgrade-tests.sh          # Upgrade tests entry point
 │   └── hack/
-│       ├── create-secrets.sh         # Secrets from .env or Vault
+│       ├── create-secrets.sh         # Secrets from env/.env or Vault
 │       ├── setup-pipelines-ci.sh     # Namespace + Tekton apply
 │       ├── create-pipelinerun.sh     # Submit acceptance PipelineRun
 │       ├── cluster-login.sh          # Shared login helpers
