@@ -90,7 +90,10 @@ spec:
     description: Capture Playwright screenshots on test failure
     default: "true"
   - name: CAPTURE_RECORDINGS
-    description: Enable Playwright video recording during tests (.webm uploaded to GCS only on failure)
+    description: Enable Playwright video recording during tests
+    default: "true"
+  - name: UPLOAD_RECORDINGS_ON_FAILURE
+    description: Upload .webm recordings to GCS only when tests fail (requires CAPTURE_RECORDINGS=true)
     default: "false"
   - name: UNINSTALL_PIPELINES_OPERATOR
     default: "false"
@@ -465,6 +468,8 @@ spec:
         value: $(params.CAPTURE_SCREENSHOTS)
       - name: CAPTURE_RECORDINGS
         value: $(params.CAPTURE_RECORDINGS)
+      - name: UPLOAD_RECORDINGS_ON_FAILURE
+        value: $(params.UPLOAD_RECORDINGS_ON_FAILURE)
       - name: FAIL_ON_ERROR
         value: "true"
     runAfter:

@@ -248,7 +248,9 @@ spec:
     - name: CAPTURE_SCREENSHOTS
       value: "${CAPTURE_SCREENSHOTS:-true}"
     - name: CAPTURE_RECORDINGS
-      value: "${CAPTURE_RECORDINGS:-false}"
+      value: "${CAPTURE_RECORDINGS:-true}"
+    - name: UPLOAD_RECORDINGS_ON_FAILURE
+      value: "${UPLOAD_RECORDINGS_ON_FAILURE:-false}"
     - name: UNINSTALL_PIPELINES_OPERATOR
       value: "${UNINSTALL_PIPELINES_OPERATOR:-false}"
     - name: SEND_SLACK_NOTIFICATION
@@ -331,7 +333,7 @@ PREFIX="acceptance-ui-tests-${_installer_tag}${_fw_tag}${_osp_short}-${_env_shor
 
 echo "=== PipelineRun → ${NS}  pipeline=acceptance-ui-tests  framework=${FW}  installer=${INSTALLER:-cluster-platforms}  cluster=${CLUSTER_NAME}  operator=${OPERATOR_VERSION}  channel=${CHANNEL}  ui-tests-branch=${GIT_UI_TESTS_BRANCH} ==="
 echo "    markers: ${MARKERS}"
-echo "    app_timeout: ${APP_TIMEOUT:-90000}  capture_screenshots: ${CAPTURE_SCREENSHOTS:-true}  capture_recordings: ${CAPTURE_RECORDINGS:-false}"
+echo "    app_timeout: ${APP_TIMEOUT:-90000}  capture_screenshots: ${CAPTURE_SCREENSHOTS:-true}  capture_recordings: ${CAPTURE_RECORDINGS:-true}  upload_recordings_on_failure: ${UPLOAD_RECORDINGS_ON_FAILURE:-false}"
 echo "    install via pipeline: ${INSTALL_PIPELINES_OPERATOR:-true}"
 echo "    setup testing accounts: ${SETUP_TESTING_ACCOUNTS:-false}"
 echo "    slack notification: ${SEND_SLACK_NOTIFICATION}"
