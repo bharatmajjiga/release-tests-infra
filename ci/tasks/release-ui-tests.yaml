@@ -26,7 +26,10 @@ spec:
     description: Capture Playwright screenshots on failure
     default: "true"
   - name: CAPTURE_RECORDINGS
-    description: Enable Playwright video recording during tests (.webm uploaded to GCS only on failure)
+    description: Enable Playwright video recording during tests
+    default: "true"
+  - name: UPLOAD_RECORDINGS_ON_FAILURE
+    description: Upload .webm recordings to GCS only when tests fail (requires CAPTURE_RECORDINGS=true)
     default: "false"
   steps:
     - name: run
@@ -71,13 +74,19 @@ spec:
         taskRunName="${TASKRUN_NAME}"
         status=fail
 
+        upload_recordings_on_failure() {
+          case "$(printf '%s' "$(params.UPLOAD_RECORDINGS_ON_FAILURE)" | tr '[:upper:]' '[:lower:]')" in
+            true|1|yes|on) return 0 ;; *) return 1 ;;
+          esac
+        }
+
         save_results() {
           echo "${taskRunName}: ${status}" > "${RESULTS_DIR}/${taskRunName}.result"
           # Framework writes under ARTIFACTS_DIR/screenshots/*.png and ARTIFACTS_DIR/recordings/*.webm
           # Flatten into results root so upload-artifacts-gcs picks up *.png / *.webm
           if [[ -d "$ARTIFACTS_DIR" ]]; then
             upload_webm=false
-            if [[ "$status" == "fail" ]]; then
+            if upload_recordings_on_failure && [[ "$status" == "fail" ]]; then
               upload_webm=true
             fi
             while IFS= read -r -d '' f; do
@@ -94,7 +103,11 @@ spec:
               cp -f "$f" "$dest"
             done < <(find "$ARTIFACTS_DIR" -type f \( -iname '*.png' -o -iname '*.webm' \) -print0 2>/dev/null)
             if [[ "$upload_webm" != true ]]; then
-              echo "Tests passed — skipping recording upload (screenshots only if present)"
+              if upload_recordings_on_failure; then
+                echo "Tests passed — skipping recording upload (screenshots only if present)"
+              else
+                echo "UPLOAD_RECORDINGS_ON_FAILURE=false — skipping recording upload"
+              fi
             fi
           fi
         }

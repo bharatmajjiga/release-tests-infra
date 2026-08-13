@@ -117,7 +117,7 @@ Required fields (same cluster/operator as acceptance, plus UI-specific):
 | 4 | `MARKERS` | `sanity` |
 | 5 | `GIT_UI_TESTS_BRANCH` | Auto from OCP version via `ci-config.yaml` (or set explicitly) |
 
-Optional: `APP_TIMEOUT` (default `90000`), `CAPTURE_SCREENSHOTS` (default `true`), `CAPTURE_RECORDINGS` (default `false`), `SETUP_TESTING_ACCOUNTS=false`, `UI_IMAGE=quay.io/openshift-pipeline/ui-ci:latest`
+Optional: `APP_TIMEOUT` (default `90000`), `CAPTURE_SCREENSHOTS` (default `true`), `CAPTURE_RECORDINGS` (default `true`), `UPLOAD_RECORDINGS_ON_FAILURE` (default `false` — upload .webm to GCS only when tests fail; requires `CAPTURE_RECORDINGS=true`), `SETUP_TESTING_ACCOUNTS=false`, `UI_IMAGE=quay.io/openshift-pipeline/ui-ci:latest`
 
 ### Step 2: Run
 
