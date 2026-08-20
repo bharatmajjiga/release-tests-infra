@@ -4,9 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HACK_DIR="$SCRIPT_DIR/hack"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/env/.env}"
+export ENV_FILE
 
-[[ -f "$REPO_ROOT/env/.env" ]] || { echo "ERROR: env/.env not found (cp env/env.template env/.env)" >&2; exit 1; }
-set -a; source "$REPO_ROOT/env/.env"; set +a
+[[ -f "$ENV_FILE" ]] || { echo "ERROR: $ENV_FILE not found (cp env/env.template env/.env)" >&2; exit 1; }
+set -a; source "$ENV_FILE"; set +a
 
 # shellcheck source=hack/cluster-login.sh
 source "$HACK_DIR/cluster-login.sh"

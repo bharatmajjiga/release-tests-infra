@@ -2,44 +2,59 @@
 
 CI infrastructure for OpenShift Pipelines acceptance and upgrade tests. Runs on any cluster (amd64, arm64, ppc64le, s390x).
 
-## Quick Start
+## Running acceptance tests
+
+Copy `env/env.template` to `env/.env.acceptance`, fill in cluster creds and operator version, then run:
 
 ```bash
-cp env/env.template env/.env    # fill in cluster creds + operator version
-./scripts/run-workflow.sh
-```
-
-Or with a per-operation env file:
-
-```bash
+cp env/env.template env/.env.acceptance
 ENV_FILE=env/.env.acceptance ./scripts/run-workflow.sh
-ENV_FILE=env/.env.upgrade   ./scripts/run-upgrade-tests.sh
 ```
+
+This:
+
+1. `create-secrets.sh` — K8s secrets from `ENV_FILE` or Vault
+2. `setup-pipelines-ci.sh` — namespace, cluster secret, Tekton tasks + pipelines
+3. `create-pipelinerun.sh` — submits the `acceptance-tests` PipelineRun
+
+## Running upgrade tests
+
+Copy `env/env.template` to `env/.env.upgrade`, fill in cluster creds and pre-upgrade / upgrade versions, then run:
+
+```bash
+cp env/env.template env/.env.upgrade
+ENV_FILE=env/.env.upgrade ./scripts/run-upgrade-tests.sh
+```
+
+This:
+
+1. `create-secrets.sh` — K8s secrets from `ENV_FILE` or Vault
+2. `setup-pipelines-ci.sh` — namespace, cluster secret, Tekton tasks + pipelines
+3. `run-upgrade-tests.sh` — submits the `upgrade-tests` PipelineRun
+
 
 ## Prerequisites
+
+Required for acceptance and upgrade tests on an existing cluster:
 
 | Tool | Purpose |
 |------|---------|
 | `oc` | OpenShift CLI |
 | `python3` + `pyyaml` | ci-config.yaml parsing |
-| `jq` | JSON processing |
-| `vault` (optional) | Credential management (`CRED_SOURCE=vault`) |
+| `jq` | JSON processing (Logging install, PVC cleanup) |
+| `skopeo` | Image digest lookup (Logging/MinIO install) |
 
-Cluster access: `KUBEADMIN_PASSWORD` + `APISERVER` in `env/.env`, or `OC_TOKEN` + `CLUSTER_CA_CERT` for `INSTALLER=cluster-platforms`.
 
-## Workflow
+### Optional tools
 
-```
-env/.env / env/.env.acceptance / env/.env.upgrade
-      │
-      ▼
-scripts/run-workflow.sh  (acceptance)
-scripts/run-upgrade-tests.sh  (upgrade)
-  1. create-secrets.sh     — K8s secrets from env/.env or Vault
-  2. setup-pipelines-ci.sh — namespace, cluster secret, Tekton tasks + pipelines
-  3. create-pipelinerun.sh — submits PipelineRun (acceptance)
-     run-upgrade-tests.sh  — submits PipelineRun (upgrade)
-```
+| Tool | When |
+|------|------|
+| `vault` | `CRED_SOURCE=vault` (request OpenShift Pipelines Vault access) |
+| `aws` | Orphan AWS cleanup; local `provision-cluster-local.sh` |
+| `gcloud` | One-time GCS bucket setup (`setup-gcs-artifacts.sh`) |
+| `openshift-install` | Local provision/destroy (the provision script can download it) |
+| `podman` or `docker` | Local FIPS provision; building the CI image |
+| `az` | ARO — used in the pipeline task, not as a local CLI |
 
 ## Pipeline Execution Order
 
@@ -104,7 +119,7 @@ Suites sharing `tests/operator/` are isolated by injecting suite-specific labels
 
 ## Configuration
 
-All values live in `env/env.template` / `env/.env`. Key variables:
+All values live in `env/env.template`, copied to `env/.env.acceptance` or `env/.env.upgrade`. Pass the file with `ENV_FILE=` when running scripts. Key variables:
 
 | Variable | Description |
 |----------|-------------|
@@ -116,7 +131,7 @@ All values live in `env/env.template` / `env/.env`. Key variables:
 | `TEST_FRAMEWORK` | `gauge` or `ginkgo` |
 | `TAGS` | Label filter (e.g. `e2e`, `sanity`) |
 | `TEST_SUITES` | Comma-separated list of suites to run |
-| `CRED_SOURCE` | `local` (from env/.env) or `vault` (from Vault) |
+| `CRED_SOURCE` | `local` (from `ENV_FILE`) or `vault` (from Vault) |
 
 ### ci-config.yaml
 
@@ -135,13 +150,13 @@ Maps operator versions to subscription channels and git branches. When `CHANNEL`
 
 ```bash
 # From Vault (recommended)
-CRED_SOURCE=vault ./scripts/hack/create-secrets.sh
+ENV_FILE=env/.env.acceptance CRED_SOURCE=vault ./scripts/hack/create-secrets.sh
 
-# From env/.env variables
-CRED_SOURCE=local ./scripts/hack/create-secrets.sh
+# From ENV_FILE variables
+ENV_FILE=env/.env.acceptance CRED_SOURCE=local ./scripts/hack/create-secrets.sh
 
 # First-time Vault login
-./scripts/hack/create-secrets.sh --vault-login
+ENV_FILE=env/.env.acceptance ./scripts/hack/create-secrets.sh --vault-login
 ```
 
 Secrets created: `aws-creds`, `github`, `pac-github-token`, `pac-gitlab`, `p12n`, `quay-io-dockerconfig`, `gcs-artifacts`, `cluster-<name>`, and others based on available credentials.
@@ -187,13 +202,12 @@ release-tests-infra/
 │   │   ├── go-mod-cache.yaml         # Shared module + build cache
 │   │   ├── upload-artifacts-gcs.yaml # GCS upload (curl-based, all architectures)
 │   │   └── ...
-│   ├── pipelineruns/                 # Test PipelineRun templates
 │   └── cronjobs/                     # Orphan cluster cleanup
 ├── scripts/
 │   ├── run-workflow.sh               # Acceptance tests entry point
 │   ├── run-upgrade-tests.sh          # Upgrade tests entry point
 │   └── hack/
-│       ├── create-secrets.sh         # Secrets from env/.env or Vault
+│       ├── create-secrets.sh         # Secrets from ENV_FILE or Vault
 │       ├── setup-pipelines-ci.sh     # Namespace + Tekton apply
 │       ├── create-pipelinerun.sh     # Submit acceptance PipelineRun
 │       ├── cluster-login.sh          # Shared login helpers
@@ -217,7 +231,7 @@ The CI image supports amd64, arm64, ppc64le, and s390x. GCS uploads use `curl` +
 
 ```bash
 # Workspace PVCs
-./scripts/hack/cleanup-pipeline-pvcs.sh --finished
+ENV_FILE=env/.env.acceptance ./scripts/hack/cleanup-pipeline-pvcs.sh --finished
 
 # Orphaned AWS clusters
 ./scripts/hack/cleanup-orphan-clusters.sh

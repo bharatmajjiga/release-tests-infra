@@ -76,32 +76,49 @@ parse_test_suites() {
   ((${#TEST_SUITE_ITEMS[@]})) || TEST_SUITE_ITEMS=(release-tests-versions)
 }
 
+ci_config_major_minor() {
+  local v="${1#v}"
+  v="${v%%-*}"
+  printf '%s' "$v" | awk -F. '{ if (NF >= 2) printf "%s.%s", $1, $2; else printf "%s", $0 }'
+}
+
 ci_config_get() {
   local ver="$1" key="$2" cfg="${REPO_ROOT}/ci-config.yaml"
   [[ -f "$cfg" ]] || return 1
-  python3 -c "
-import yaml, sys
-with open('$cfg') as f:
-    c = yaml.safe_load(f)
-ver = '$ver'
-keys = '$key'.split('.')
-v = c.get(ver)
-if v is None:
+  python3 - "$cfg" "$ver" "$key" <<'PY'
+import sys
+try:
+    import yaml
+except ImportError:
+    print("ERROR: PyYAML required to read ci-config.yaml (pip install pyyaml)", file=sys.stderr)
     sys.exit(1)
-for k in keys:
-    if isinstance(v, dict):
-        v = v.get(k)
-    else:
+cfg, ver, key = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(cfg) as f:
+    c = yaml.safe_load(f) or {}
+node = c.get(ver)
+if node is None:
+    for k, val in c.items():
+        if str(k) == str(ver):
+            node = val
+            break
+if node is None:
+    sys.exit(1)
+for k in key.split("."):
+    if not isinstance(node, dict):
         sys.exit(1)
-if v is None:
-    sys.exit(1)
-print(v, end='')
-" 2>/dev/null
+    node = node.get(k)
+    if node is None:
+        sys.exit(1)
+print(node, end="")
+PY
 }
 
 resolve_from_ci_config() {
   [[ -n "${OPERATOR_VERSION:-}" ]] || die "OPERATOR_VERSION required in env/.env"
-  local ver="${OPERATOR_VERSION%.*}"
+  local ver
+  ver="$(ci_config_major_minor "$OPERATOR_VERSION")"
+  [[ -z "${GIT_RELEASE_TESTS_BRANCH:-}" ]] && unset GIT_RELEASE_TESTS_BRANCH
+  [[ -z "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]] && unset GIT_RELEASE_TESTS_GINKGO_BRANCH
 
   if [[ -z "${CHANNEL:-}" || "${CHANNEL}" == latest ]]; then
     CHANNEL=$(ci_config_get "$ver" channel) \
@@ -112,11 +129,15 @@ resolve_from_ci_config() {
   if [[ -z "${GIT_RELEASE_TESTS_BRANCH:-}" ]]; then
     GIT_RELEASE_TESTS_BRANCH=$(ci_config_get "$ver" release-tests.revision) || true
     export GIT_RELEASE_TESTS_BRANCH
+    [[ -n "${GIT_RELEASE_TESTS_BRANCH:-}" ]] \
+      && echo "Auto-resolved GIT_RELEASE_TESTS_BRANCH=${GIT_RELEASE_TESTS_BRANCH} from ci-config.yaml (${ver})"
   fi
 
   if [[ -z "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]]; then
     GIT_RELEASE_TESTS_GINKGO_BRANCH=$(ci_config_get "$ver" release-tests-ginkgo.revision) || true
     export GIT_RELEASE_TESTS_GINKGO_BRANCH
+    [[ -n "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]] \
+      && echo "Auto-resolved GIT_RELEASE_TESTS_GINKGO_BRANCH=${GIT_RELEASE_TESTS_GINKGO_BRANCH} from ci-config.yaml (${ver})"
   fi
 }
 

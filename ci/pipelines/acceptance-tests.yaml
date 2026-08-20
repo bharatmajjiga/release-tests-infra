@@ -1416,6 +1416,8 @@ spec:
           value: $(context.pipelineRun.name)
         - name: OPERATOR_VERSION
           value: $(params.OPERATOR_VERSION)
+        - name: IMAGE
+          value: $(params.IMAGE)
       taskRef:
         name: upload-artifacts-gcs
       workspaces:
