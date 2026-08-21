@@ -452,20 +452,13 @@ spec:
           [[ -f "$tmpl" ]] || { echo "WARN: ${tmpl} missing, cannot pin startingCSV"; return 0; }
           csv="openshift-pipelines-operator-rh.v${ver}"
           echo "Pinning OLM subscription startingCSV=${csv} (Manual approval)"
-          cat > "$tmpl" <<EOF
-apiVersion: operators.coreos.com/v1alpha1
-kind: Subscription
-metadata:
-  name: {{.SubscriptionName}}
-  namespace: {{.OperatorNamespace}}
-spec:
-  channel: {{.Channel}}
-  installPlanApproval: Manual
-  startingCSV: ${csv}
-  name: {{.SubscriptionName}}
-  source: {{.CatalogSource}}
-  sourceNamespace: {{.SourceNamespace}}
-EOF
+          grep -q 'installPlanApproval: Automatic' "$tmpl" \
+            && sed -i 's/installPlanApproval: Automatic/installPlanApproval: Manual/' "$tmpl"
+          if grep -q 'startingCSV:' "$tmpl"; then
+            sed -i "s#startingCSV:.*#startingCSV: ${csv}#" "$tmpl"
+          else
+            sed -i "/installPlanApproval: Manual/a\\  startingCSV: ${csv}" "$tmpl"
+          fi
         }
 
         approve_starting_csv_installplan() {
