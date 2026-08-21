@@ -113,12 +113,63 @@ print(node, end="")
 PY
 }
 
+# True (exit 0) if ci-config.yaml has a top-level entry for the given major.minor.
+ci_config_has_version() {
+  local ver="$1" cfg="${REPO_ROOT}/ci-config.yaml"
+  [[ -f "$cfg" ]] || return 1
+  python3 - "$cfg" "$ver" <<'PY'
+import sys
+try:
+    import yaml
+except ImportError:
+    print("ERROR: PyYAML required to read ci-config.yaml (pip install pyyaml)", file=sys.stderr)
+    sys.exit(2)
+cfg, ver = sys.argv[1], sys.argv[2]
+with open(cfg) as f:
+    c = yaml.safe_load(f) or {}
+sys.exit(0 if str(ver) in {str(k) for k in c} else 1)
+PY
+}
+
+# Space-separated list of major.minor versions declared in ci-config.yaml (for error messages).
+ci_config_versions() {
+  local cfg="${REPO_ROOT}/ci-config.yaml"
+  [[ -f "$cfg" ]] || return 1
+  python3 - "$cfg" <<'PY'
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(2)
+with open(sys.argv[1]) as f:
+    c = yaml.safe_load(f) or {}
+print(" ".join(str(k) for k in c))
+PY
+}
+
 resolve_from_ci_config() {
   [[ -n "${OPERATOR_VERSION:-}" ]] || die "OPERATOR_VERSION required in env/.env"
   local ver
   ver="$(ci_config_major_minor "$OPERATOR_VERSION")"
   [[ -z "${GIT_RELEASE_TESTS_BRANCH:-}" ]] && unset GIT_RELEASE_TESTS_BRANCH
   [[ -z "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]] && unset GIT_RELEASE_TESTS_GINKGO_BRANCH
+
+  # Require a ci-config.yaml entry for this operator version, unless the
+  # framework-required branch is already provided explicitly in env/.env.
+  if ! ci_config_has_version "$ver"; then
+    local branch_var have_branch=false
+    if [[ "$FW" == ginkgo ]]; then
+      branch_var=GIT_RELEASE_TESTS_GINKGO_BRANCH
+      [[ -n "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]] && have_branch=true
+    else
+      branch_var=GIT_RELEASE_TESTS_BRANCH
+      [[ -n "${GIT_RELEASE_TESTS_BRANCH:-}" ]] && have_branch=true
+    fi
+    if [[ "$have_branch" != true ]]; then
+      die "OPERATOR_VERSION=${OPERATOR_VERSION} (${ver}) has no entry in ci-config.yaml (available: $(ci_config_versions)). Add a '${ver}:' block to ci-config.yaml, or set ${branch_var} (and CHANNEL) in env/.env."
+    fi
+    echo "WARNING: ci-config.yaml has no '${ver}' entry; using ${branch_var} from env/.env"
+  fi
 
   if [[ -z "${CHANNEL:-}" || "${CHANNEL}" == latest ]]; then
     CHANNEL=$(ci_config_get "$ver" channel) \
@@ -139,6 +190,10 @@ resolve_from_ci_config() {
     [[ -n "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]] \
       && echo "Auto-resolved GIT_RELEASE_TESTS_GINKGO_BRANCH=${GIT_RELEASE_TESTS_GINKGO_BRANCH} from ci-config.yaml (${ver})"
   fi
+
+  # Guard against set -e: a trailing "[[ ... ]] && echo" above can leave the
+  # function's exit status at 1, which would abort the script silently.
+  return 0
 }
 
 write_workspace_spec() {
