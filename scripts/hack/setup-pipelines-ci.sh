@@ -128,9 +128,9 @@ install_pipelines_operator() {
   local cat_src="${CATALOG_SOURCE:-${UPGRADE_CATALOG_SOURCE:-redhat-operators}}"
   local env="${OPERATOR_ENVIRONMENT:-${UPGRADE_OPERATOR_ENVIRONMENT:-pre-stage}}"
   local idx="${KONFLUX_INDEX_IMAGE:-${UPGRADE_KONFLUX_INDEX_IMAGE:-}}"
-  echo "=== Installing OpenShift Pipelines operator (${ver}, ${cat_src}/${CHANNEL}) ==="
+  echo "=== Installing OpenShift Pipelines operator (${ver}, ${cat_src}/${CHANNEL}${ver:+, csv=openshift-pipelines-operator-rh.v${ver}}) ==="
   CATALOG_SOURCE="$cat_src" OPERATOR_ENVIRONMENT="$env" KONFLUX_INDEX_IMAGE="$idx" apply_custom_catalog
-  CHANNEL="${CHANNEL}" CATALOG_SOURCE="$cat_src" \
+  CHANNEL="${CHANNEL}" CATALOG_SOURCE="$cat_src" OPERATOR_VERSION="${ver}" \
     bash "$REPO_ROOT/config/operators/install-pipelines.sh"
 }
 

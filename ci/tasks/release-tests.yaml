@@ -447,6 +447,40 @@ spec:
           echo "Logged in as $(oc whoami) on $(oc whoami --show-server)"
         }
 
+        pin_subscription_template() {
+          local ver="$1" tmpl="template/subscription.yaml.tmp" csv
+          [[ -f "$tmpl" ]] || { echo "WARN: ${tmpl} missing, cannot pin startingCSV"; return 0; }
+          csv="openshift-pipelines-operator-rh.v${ver}"
+          echo "Pinning OLM subscription startingCSV=${csv} (Manual approval)"
+          grep -q 'installPlanApproval: Automatic' "$tmpl" \
+            && sed -i 's/installPlanApproval: Automatic/installPlanApproval: Manual/' "$tmpl"
+          if grep -q 'startingCSV:' "$tmpl"; then
+            sed -i "s#startingCSV:.*#startingCSV: ${csv}#" "$tmpl"
+          else
+            sed -i "/installPlanApproval: Manual/a\\  startingCSV: ${csv}" "$tmpl"
+          fi
+        }
+
+        approve_starting_csv_installplan() {
+          local ver="$1" csv="openshift-pipelines-operator-rh.v${ver}" deadline=$((SECONDS + 480)) ip names phase
+          while (( SECONDS < deadline )); do
+            phase=$(oc get csv "$csv" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            [[ "$phase" == Succeeded ]] && return 0
+            while IFS= read -r ip; do
+              [[ -n "$ip" ]] || continue
+              names=$(oc get installplan "$ip" -n openshift-operators \
+                -o jsonpath='{.spec.clusterServiceVersionNames[*]}' 2>/dev/null || true)
+              if [[ "$names" == *"$csv"* ]]; then
+                echo "Approving InstallPlan ${ip} for ${csv}"
+                oc patch installplan "$ip" -n openshift-operators --type merge -p '{"spec":{"approved":true}}' || true
+              fi
+            done < <(oc get installplan -n openshift-operators \
+              -o jsonpath='{range .items[?(@.spec.approved==false)]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+            sleep 5
+          done
+          echo "WARN: ${csv} not Succeeded within timeout"
+        }
+
         run_gauge() {
           local tags="$1" target="$(params.SPECS)"
           [[ -f manifest.json ]] || { echo "ERROR: manifest.json missing in $(pwd)"; ls -la; exit 1; }
@@ -454,10 +488,15 @@ spec:
           local log="${report_path}/gauge.log"
           export GOFLAGS="${GOFLAGS:-} -vet=off"
           if [[ "$tags" == install || "$tags" == uninstall || "$tags" == upgrade ]]; then
+            if [[ "$tags" == install || "$tags" == upgrade ]]; then
+              pin_subscription_template "${OSP_VER}"
+              approve_starting_csv_installplan "${OSP_VER}" &
+            fi
             gauge_reports_dir="${report_path}" logs_directory="${report_path}" \
               CATALOG_SOURCE="$(params.CATALOG_SOURCE)" CHANNEL="$(params.CHANNEL)" \
               IS_DISCONNECTED="$(params.IS_DISCONNECTED)" \
               gauge run --tags="${tags}" --log-level=debug --verbose "${target}" 2>&1 | tee "$log"
+            wait || true
           else
             local jitter=$((RANDOM % 120))
             sleep "$jitter"
@@ -482,6 +521,10 @@ spec:
             install|uninstall|upgrade)
               path=tests/olm/
               export CATALOG_SOURCE="$(params.CATALOG_SOURCE)" CHANNEL="$(params.CHANNEL)"
+              if [[ "$tags" == install || "$tags" == upgrade ]]; then
+                pin_subscription_template "${OSP_VER}"
+                approve_starting_csv_installplan "${OSP_VER}" &
+              fi
               ;;
           esac
           find tests -name '*.test' -delete 2>/dev/null || true
@@ -501,6 +544,7 @@ spec:
             --procs=1 \
             --label-filter="$filter" --timeout="$timeout" --junit-report=junit-report.xml \
             --output-dir="${report_path}" --randomize-all -v "$path" 2>&1 | tee "$log"
+          wait || true
         }
 
         save_results() {

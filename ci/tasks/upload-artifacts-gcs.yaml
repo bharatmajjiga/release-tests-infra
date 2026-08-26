@@ -10,8 +10,8 @@ spec:
       description: Operator version (used as path prefix for organizing artifacts)
       default: ""
     - name: IMAGE
-      description: CI image (uses curl for GCS uploads — works on all architectures)
-      default: quay.io/openshift-pipeline/ci:latest
+      description: CI image (must match cluster arch; :latest is amd64-only)
+      default: quay.io/openshift-pipeline/ci:test
   results:
     - name: artifacts-url
       description: Public URL to the artifacts index.html (clickable, no auth required)

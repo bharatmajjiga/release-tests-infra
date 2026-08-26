@@ -45,31 +45,46 @@ parse_test_suites() {
   done
 }
 
+ci_config_major_minor() {
+  local v="${1#v}"
+  v="${v%%-*}"
+  printf '%s' "$v" | awk -F. '{ if (NF >= 2) printf "%s.%s", $1, $2; else printf "%s", $0 }'
+}
+
 ci_config_get() {
   local ver="$1" key="$2" cfg="${REPO_ROOT}/ci-config.yaml"
   [[ -f "$cfg" ]] || return 1
-  python3 -c "
-import yaml, sys
-with open('$cfg') as f:
-    c = yaml.safe_load(f)
-ver = '$ver'
-keys = '$key'.split('.')
-v = c.get(ver)
-if v is None:
+  python3 - "$cfg" "$ver" "$key" <<'PY'
+import sys
+try:
+    import yaml
+except ImportError:
+    print("ERROR: PyYAML required to read ci-config.yaml (pip install pyyaml)", file=sys.stderr)
     sys.exit(1)
-for k in keys:
-    if isinstance(v, dict):
-        v = v.get(k)
-    else:
+cfg, ver, key = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(cfg) as f:
+    c = yaml.safe_load(f) or {}
+node = c.get(ver)
+if node is None:
+    for k, val in c.items():
+        if str(k) == str(ver):
+            node = val
+            break
+if node is None:
+    sys.exit(1)
+for k in key.split("."):
+    if not isinstance(node, dict):
         sys.exit(1)
-if v is None:
-    sys.exit(1)
-print(v, end='')
-" 2>/dev/null
+    node = node.get(k)
+    if node is None:
+        sys.exit(1)
+print(node, end="")
+PY
 }
 
 resolve_channel() {
-  local ver=$1 ch=$2 short="${1%.*}"
+  local ver=$1 ch=$2 short
+  short="$(ci_config_major_minor "$ver")"
   if [[ -z "$ch" || "$ch" == latest ]]; then
     ch=$(ci_config_get "$short" channel) || ch="pipelines-${short}"
   fi
@@ -154,13 +169,25 @@ OPERATOR_ENVIRONMENT="${UPGRADE_OPERATOR_ENVIRONMENT:-pre-stage}" \
   validate_operator_env || missing+=("UPGRADE env/catalog mismatch (see error above)")
 
 FW="$(printf '%s' "${TEST_FRAMEWORK:-gauge}" | tr '[:upper:]' '[:lower:]')"
-# Auto-resolve git branches from ci-config.yaml using UPGRADE_VERSION
-ver_short="${UPGRADE_VERSION%.*}"
+# Empty branch vars from env.template must not block ci-config.yaml auto-resolve.
+[[ -z "${GIT_RELEASE_TESTS_BRANCH:-}" ]] && unset GIT_RELEASE_TESTS_BRANCH
+[[ -z "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]] && unset GIT_RELEASE_TESTS_GINKGO_BRANCH
+
+# Auto-resolve git branches from ci-config.yaml using UPGRADE_VERSION (e.g. 1.15.5 → 1.15)
+ver_short="$(ci_config_major_minor "${UPGRADE_VERSION:-}")"
 if [[ "$FW" == gauge && -z "${GIT_RELEASE_TESTS_BRANCH:-}" ]]; then
-  GIT_RELEASE_TESTS_BRANCH=$(ci_config_get "$ver_short" release-tests.revision) || true
+  if GIT_RELEASE_TESTS_BRANCH=$(ci_config_get "$ver_short" release-tests.revision); then
+    echo "Auto-resolved GIT_RELEASE_TESTS_BRANCH=${GIT_RELEASE_TESTS_BRANCH} from ci-config.yaml (${ver_short})"
+  else
+    missing+=("GIT_RELEASE_TESTS_BRANCH (ci-config.yaml has no release-tests.revision for ${ver_short} from UPGRADE_VERSION=${UPGRADE_VERSION:-})")
+  fi
 fi
 if [[ "$FW" == ginkgo && -z "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]]; then
-  GIT_RELEASE_TESTS_GINKGO_BRANCH=$(ci_config_get "$ver_short" release-tests-ginkgo.revision) || true
+  if GIT_RELEASE_TESTS_GINKGO_BRANCH=$(ci_config_get "$ver_short" release-tests-ginkgo.revision); then
+    echo "Auto-resolved GIT_RELEASE_TESTS_GINKGO_BRANCH=${GIT_RELEASE_TESTS_GINKGO_BRANCH} from ci-config.yaml (${ver_short})"
+  else
+    missing+=("GIT_RELEASE_TESTS_GINKGO_BRANCH (ci-config.yaml has no release-tests-ginkgo.revision for ${ver_short} from UPGRADE_VERSION=${UPGRADE_VERSION:-})")
+  fi
 fi
 
 case "$FW" in
