@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi9/go-toolset:1.26
+FROM registry.access.redhat.com/ubi9/go-toolset:1.26.4
 
 USER root
 
@@ -59,9 +59,9 @@ RUN curl -fsSL "https://dl.min.io/client/mc/release/linux-${TARGETARCH}/mc" \
     -o /usr/local/bin/mc && chmod +x /usr/local/bin/mc
 
 # ROSA CLI (latest)
-RUN git clone --depth 1 https://github.com/openshift/rosa.git /tmp/rosa && \
-    cd /tmp/rosa && go build -o /usr/local/bin/rosa ./cmd/rosa && \
-    rm -rf /tmp/rosa
+# RUN git clone --depth 1 https://github.com/openshift/rosa.git /tmp/rosa && \
+#     cd /tmp/rosa && go build -o /usr/local/bin/rosa ./cmd/rosa && \
+#     rm -rf /tmp/rosa
 
 # Azure CLI (only for amd64/arm64 — no prebuilt wheels for ppc64le/s390x)
 RUN if [ "$TARGETARCH" = "amd64" ] || [ "$TARGETARCH" = "arm64" ]; then \
