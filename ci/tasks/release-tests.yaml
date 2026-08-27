@@ -271,6 +271,37 @@ spec:
           echo "  opc version: $(${TOOLS_BIN}/opc version 2>/dev/null | head -1 || echo unknown)"
         }
 
+        # Called only after the operator CSV reaches Succeeded during an upgrade.
+        # tkn-cli-serve now serves the upgraded (UPGRADE_VERSION) binaries, so we
+        # force a fresh download and also overwrite the shared PVC copy so every
+        # consecutive TaskRun uses the upgraded opc/tkn instead of the cached one.
+        refresh_cli_from_upgraded_cluster() {
+          local url archive tmp jar t
+          url=$(resolve_tkn_url "$(params.TKN_DOWNLOAD_URL)")
+          archive="/tmp/tkn-linux-${CLI_ARCH}.tar.gz"
+          rm -f "$archive"
+          echo "Operator upgraded — downloading tkn/opc from upgraded cluster: ${url}"
+          tmp="${archive}.part.$$"; jar=$(mktemp)
+          curl -kfsSL -c "$jar" -b "$jar" "$url" -o "$tmp" && rm -f "$jar" && mv "$tmp" "$archive"
+          tar xzf "$archive" -C "$TOOLS_BIN" --strip-components=1
+          hash -r
+          echo "  tkn version: $(${TOOLS_BIN}/tkn version 2>/dev/null | head -1 || echo unknown)"
+          echo "  opc version: $(${TOOLS_BIN}/opc version 2>/dev/null | head -1 || echo unknown)"
+
+          # Refresh the shared cache so consecutive tasks (e2e, versions, ...) that
+          # read CACHED_TOOLS_BIN also get the upgraded CLI, not the pre-upgrade one.
+          if [[ -n "${CACHED_TOOLS_BIN:-}" && -d "$CACHED_TOOLS_BIN" ]]; then
+            local lock="${GOMODCACHE_ROOT}/.lock"
+            (
+              flock -w 300 9 || { echo "WARN: cache lock timeout; skipped shared CLI refresh"; exit 0; }
+              for t in tkn opc; do
+                [[ -x "${TOOLS_BIN}/${t}" ]] && cp -f "${TOOLS_BIN}/${t}" "${CACHED_TOOLS_BIN}/${t}"
+              done
+              echo "Refreshed shared cached tkn/opc for consecutive tasks: ${CACHED_TOOLS_BIN}"
+            ) 9>"$lock"
+          fi
+        }
+
         ensure_gauge() {
           command -v gauge >/dev/null && return
           [[ -x "$TOOLS_BIN/gauge" ]] && return
@@ -292,11 +323,9 @@ spec:
           local tags="$(params.TAGS)"
           [[ -x "${CACHED_TOOLS_BIN:-}/oc" || -x "$TOOLS_BIN/oc" ]] || install_oc
 
-          # After operator upgrade, re-download tkn/opc to pick up the new version
-          if [[ "$tags" == "upgrade" || "$tags" == "post-upgrade" ]]; then
-            echo "Upgrade flow — downloading tkn/opc from upgraded cluster"
-            install_tkn
-          else
+          # upgrade/post-upgrade: tkn/opc come from tkn-cli-serve *after* CSV is Succeeded.
+          # Using the PVC cache here serves the pre-upgrade (e.g. 1.23.1) binaries.
+          if [[ "$tags" != upgrade && "$tags" != post-upgrade ]]; then
             [[ (-x "${CACHED_TOOLS_BIN:-}/tkn" && -x "${CACHED_TOOLS_BIN:-}/opc") || (-x "$TOOLS_BIN/tkn" && -x "$TOOLS_BIN/opc") ]] || install_tkn
           fi
 
@@ -356,7 +385,15 @@ spec:
           fi
           mkdir -p "$TOOLS_BIN"
           export GOCACHE
-          if [[ -n "${CACHED_TOOLS_BIN:-}" && -d "$CACHED_TOOLS_BIN" ]]; then
+          local tags="$(params.TAGS)"
+          # Ephemeral TOOLS_BIN first so refreshed tkn/opc beat go-mod-cache's pre-upgrade copies.
+          if [[ "$tags" == upgrade || "$tags" == post-upgrade ]]; then
+            if [[ -n "${CACHED_TOOLS_BIN:-}" && -d "$CACHED_TOOLS_BIN" ]]; then
+              export PATH="${TOOLS_BIN}:${CACHED_TOOLS_BIN}:${PATH}"
+            else
+              export PATH="${TOOLS_BIN}:${PATH}"
+            fi
+          elif [[ -n "${CACHED_TOOLS_BIN:-}" && -d "$CACHED_TOOLS_BIN" ]]; then
             export PATH="${CACHED_TOOLS_BIN}:${TOOLS_BIN}:${PATH}"
           else
             export PATH="${TOOLS_BIN}:${PATH}"
@@ -417,10 +454,15 @@ spec:
         }
 
         require_tools() {
-          local t
-          for t in oc tkn opc; do
+          local t skip_cli="${1:-}"
+          for t in oc; do
             command -v "$t" >/dev/null || { echo "ERROR: ${t} missing"; exit 1; }
           done
+          if [[ "$skip_cli" != skip-cli ]]; then
+            for t in tkn opc; do
+              command -v "$t" >/dev/null || { echo "ERROR: ${t} missing"; exit 1; }
+            done
+          fi
           case "$FRAMEWORK" in
             gauge)  command -v gauge >/dev/null || { echo "ERROR: gauge missing"; exit 1; } ;;
             ginkgo) command -v ginkgo >/dev/null || { echo "ERROR: ginkgo missing"; exit 1; } ;;
@@ -448,9 +490,10 @@ spec:
         }
 
         pin_subscription_template() {
-          local ver="$1" tmpl="template/subscription.yaml.tmp" csv
+          local ver="$1"
+          local tmpl="template/subscription.yaml.tmp"
+          local csv="openshift-pipelines-operator-rh.v${ver}"
           [[ -f "$tmpl" ]] || { echo "WARN: ${tmpl} missing, cannot pin startingCSV"; return 0; }
-          csv="openshift-pipelines-operator-rh.v${ver}"
           echo "Pinning OLM subscription startingCSV=${csv} (Manual approval)"
           grep -q 'installPlanApproval: Automatic' "$tmpl" \
             && sed -i 's/installPlanApproval: Automatic/installPlanApproval: Manual/' "$tmpl"
@@ -461,24 +504,202 @@ spec:
           fi
         }
 
-        approve_starting_csv_installplan() {
-          local ver="$1" csv="openshift-pipelines-operator-rh.v${ver}" deadline=$((SECONDS + 480)) ip names phase
+        # Strip any pinned startingCSV from the ginkgo OLM template so the operator
+        # installs the head of the channel (latest z-stream) instead of a fixed CSV.
+        unpin_subscription_template() {
+          local tmpl="template/subscription.yaml.tmp"
+          [[ -f "$tmpl" ]] || { echo "WARN: ${tmpl} missing, cannot unpin startingCSV"; return 0; }
+          echo "Unpinning startingCSV in ${tmpl} (install latest on channel)"
+          grep -q 'installPlanApproval: Automatic' "$tmpl" \
+            && sed -i 's/installPlanApproval: Automatic/installPlanApproval: Manual/' "$tmpl"
+          sed -i '/^[[:space:]]*startingCSV:/d' "$tmpl"
+        }
+
+        # Read the version of the currently installed pipelines operator from the
+        # live cluster (e.g. "1.23.3" from openshift-pipelines-operator-rh.v1.23.3).
+        resolve_installed_osp_version() {
+          local csv
+          csv=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators \
+            -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)
+          [[ -n "$csv" ]] || csv=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators \
+            -o jsonpath='{.status.currentCSV}' 2>/dev/null || true)
+          printf '%s' "${csv#openshift-pipelines-operator-rh.v}"
+        }
+
+        # Unpinned approval loop: approve any Manual InstallPlan for the pipelines
+        # operator and wait until the subscription's installedCSV reaches Succeeded,
+        # regardless of the exact z-stream (channel head).
+        approve_latest_installplan() {
+          local deadline=$((SECONDS + 900))
+          local ip names phase approved installed
+          echo "Waiting for latest CSV on channel (approving Manual InstallPlans)..."
           while (( SECONDS < deadline )); do
-            phase=$(oc get csv "$csv" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || true)
-            [[ "$phase" == Succeeded ]] && return 0
+            installed=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators \
+              -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)
+            if [[ -n "$installed" ]]; then
+              phase=$(oc get csv "$installed" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || true)
+              if [[ "$phase" == Succeeded ]]; then
+                echo "Installed ${installed} (phase=Succeeded)"
+                return 0
+              fi
+            fi
             while IFS= read -r ip; do
               [[ -n "$ip" ]] || continue
               names=$(oc get installplan "$ip" -n openshift-operators \
                 -o jsonpath='{.spec.clusterServiceVersionNames[*]}' 2>/dev/null || true)
-              if [[ "$names" == *"$csv"* ]]; then
+              approved=$(oc get installplan "$ip" -n openshift-operators \
+                -o jsonpath='{.spec.approved}' 2>/dev/null || true)
+              if [[ "$names" == *openshift-pipelines-operator-rh* && "$approved" != true ]]; then
+                echo "Approving InstallPlan ${ip} (${names})"
+                oc patch installplan "$ip" -n openshift-operators --type merge -p '{"spec":{"approved":true}}' || true
+              fi
+            done < <(oc get installplan -n openshift-operators --no-headers 2>/dev/null | awk '{print $1}')
+            echo "  operator CSV installed=${installed:-none} phase=${phase:-none}..."
+            sleep 10
+          done
+          echo "ERROR: operator did not reach Succeeded on channel"
+          oc get subscription,csv,installplan -n openshift-operators || true
+          return 1
+        }
+
+        # Upgrade approval: OLM drives the version via the channel graph (startingCSV is
+        # ignored on an existing subscription), so approve whatever InstallPlan the target
+        # channel produces and wait until the installedCSV lands on the target minor
+        # (any z-stream / build suffix), rather than a fixed CSV name.
+        approve_upgrade_installplan() {
+          local ver="$1"
+          local target="${ver%.*}"
+          local prefix="openshift-pipelines-operator-rh.v${target}."
+          local deadline=$((SECONDS + 1800))
+          local ip names approved installed phase
+          echo "Waiting for operator to upgrade to ${target}.x (approving Manual InstallPlans)..."
+          while (( SECONDS < deadline )); do
+            installed=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators \
+              -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)
+            if [[ "$installed" == "${prefix}"* ]]; then
+              phase=$(oc get csv "$installed" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || true)
+              if [[ "$phase" == Succeeded ]]; then
+                echo "Upgraded to ${installed} (phase=Succeeded)"
+                return 0
+              fi
+            fi
+            while IFS= read -r ip; do
+              [[ -n "$ip" ]] || continue
+              names=$(oc get installplan "$ip" -n openshift-operators \
+                -o jsonpath='{.spec.clusterServiceVersionNames[*]}' 2>/dev/null || true)
+              approved=$(oc get installplan "$ip" -n openshift-operators \
+                -o jsonpath='{.spec.approved}' 2>/dev/null || true)
+              if [[ "$names" == *openshift-pipelines-operator-rh* && "$approved" != true ]]; then
+                echo "Approving InstallPlan ${ip} (${names})"
+                oc patch installplan "$ip" -n openshift-operators --type merge -p '{"spec":{"approved":true}}' || true
+              fi
+            done < <(oc get installplan -n openshift-operators --no-headers 2>/dev/null | awk '{print $1}')
+            echo "  operator installedCSV=${installed:-none} (want ${target}.x)..."
+            sleep 10
+          done
+          echo "ERROR: operator did not upgrade to ${target}.x"
+          oc get subscription,csv,installplan -n openshift-operators || true
+          return 1
+        }
+
+        # Must not use `local ver=... csv="...${ver}"` — with set -u, ${ver} is unbound in the same local statement.
+        approve_starting_csv_installplan() {
+          local ver="$1"
+          local csv="openshift-pipelines-operator-rh.v${ver}"
+          local deadline=$((SECONDS + 900))
+          local ip names phase approved
+          echo "Waiting for CSV ${csv} (approving Manual InstallPlans)..."
+          while (( SECONDS < deadline )); do
+            phase=$(oc get csv "$csv" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            if [[ "$phase" == Succeeded ]]; then
+              echo "CSV ${csv} phase=Succeeded"
+              return 0
+            fi
+            while IFS= read -r ip; do
+              [[ -n "$ip" ]] || continue
+              names=$(oc get installplan "$ip" -n openshift-operators \
+                -o jsonpath='{.spec.clusterServiceVersionNames[*]}' 2>/dev/null || true)
+              approved=$(oc get installplan "$ip" -n openshift-operators \
+                -o jsonpath='{.spec.approved}' 2>/dev/null || true)
+              if [[ "$names" == *"$csv"* && "$approved" != true ]]; then
                 echo "Approving InstallPlan ${ip} for ${csv}"
                 oc patch installplan "$ip" -n openshift-operators --type merge -p '{"spec":{"approved":true}}' || true
               fi
-            done < <(oc get installplan -n openshift-operators \
-              -o jsonpath='{range .items[?(@.spec.approved==false)]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
-            sleep 5
+            done < <(oc get installplan -n openshift-operators --no-headers 2>/dev/null | awk '{print $1}')
+            echo "  CSV ${csv} phase=${phase:-none}..."
+            sleep 10
           done
-          echo "WARN: ${csv} not Succeeded within timeout"
+          echo "ERROR: ${csv} did not reach Succeeded"
+          oc get subscription,csv,installplan -n openshift-operators || true
+          return 1
+        }
+
+        ensure_operator_csv() {
+          local ver="$1"
+          local mode="${2:-}"
+          local csv="openshift-pipelines-operator-rh.v${ver}"
+          local channel src
+          channel="$(params.CHANNEL)"
+          src="$(params.CATALOG_SOURCE)"
+
+          # Unpinned path — used for both:
+          #  - pre-upgrade channel-head install (INSTALL_LATEST): latest z-stream from prod
+          #  - upgrade to the next minor (mode=upgrade): OLM follows the channel graph
+          # In both cases startingCSV must NOT be pinned (ignored on an existing
+          # subscription); we approve whatever InstallPlan the target channel produces.
+          if [[ "$mode" == upgrade || "${INSTALL_LATEST:-false}" == true ]]; then
+            unpin_subscription_template
+            echo "Ensuring latest operator on ${src}/${channel} (no startingCSV pin, Manual approval)"
+            if oc get subscription openshift-pipelines-operator-rh -n openshift-operators &>/dev/null; then
+              oc patch subscription openshift-pipelines-operator-rh -n openshift-operators --type json \
+                -p '[{"op":"remove","path":"/spec/startingCSV"}]' 2>/dev/null || true
+              oc patch subscription openshift-pipelines-operator-rh -n openshift-operators --type merge \
+                -p "{\"spec\":{\"channel\":\"${channel}\",\"source\":\"${src}\",\"sourceNamespace\":\"openshift-marketplace\",\"installPlanApproval\":\"Manual\"}}"
+            else
+              printf '%s\n' \
+                'apiVersion: operators.coreos.com/v1alpha1' \
+                'kind: Subscription' \
+                'metadata:' \
+                '  name: openshift-pipelines-operator-rh' \
+                '  namespace: openshift-operators' \
+                'spec:' \
+                "  channel: ${channel}" \
+                '  installPlanApproval: Manual' \
+                '  name: openshift-pipelines-operator-rh' \
+                "  source: ${src}" \
+                '  sourceNamespace: openshift-marketplace' \
+              | oc apply -f -
+            fi
+            if [[ "$mode" == upgrade ]]; then
+              approve_upgrade_installplan "$ver"
+            else
+              approve_latest_installplan
+            fi
+            return
+          fi
+
+          pin_subscription_template "$ver"
+          echo "Ensuring operator ${csv} on ${src}/${channel} (Manual approval)"
+          if oc get subscription openshift-pipelines-operator-rh -n openshift-operators &>/dev/null; then
+            oc patch subscription openshift-pipelines-operator-rh -n openshift-operators --type merge \
+              -p "{\"spec\":{\"channel\":\"${channel}\",\"source\":\"${src}\",\"sourceNamespace\":\"openshift-marketplace\",\"installPlanApproval\":\"Manual\",\"startingCSV\":\"${csv}\"}}"
+          else
+            printf '%s\n' \
+              'apiVersion: operators.coreos.com/v1alpha1' \
+              'kind: Subscription' \
+              'metadata:' \
+              '  name: openshift-pipelines-operator-rh' \
+              '  namespace: openshift-operators' \
+              'spec:' \
+              "  channel: ${channel}" \
+              '  installPlanApproval: Manual' \
+              "  startingCSV: ${csv}" \
+              '  name: openshift-pipelines-operator-rh' \
+              "  source: ${src}" \
+              '  sourceNamespace: openshift-marketplace' \
+            | oc apply -f -
+          fi
+          approve_starting_csv_installplan "$ver"
         }
 
         run_gauge() {
@@ -488,9 +709,10 @@ spec:
           local log="${report_path}/gauge.log"
           export GOFLAGS="${GOFLAGS:-} -vet=off"
           if [[ "$tags" == install || "$tags" == uninstall || "$tags" == upgrade ]]; then
-            if [[ "$tags" == install || "$tags" == upgrade ]]; then
+            if [[ "$tags" == install && "${INSTALL_LATEST:-false}" == true ]]; then
+              unpin_subscription_template
+            elif [[ "$tags" == install || "$tags" == upgrade ]]; then
               pin_subscription_template "${OSP_VER}"
-              approve_starting_csv_installplan "${OSP_VER}" &
             fi
             gauge_reports_dir="${report_path}" logs_directory="${report_path}" \
               CATALOG_SOURCE="$(params.CATALOG_SOURCE)" CHANNEL="$(params.CHANNEL)" \
@@ -521,9 +743,10 @@ spec:
             install|uninstall|upgrade)
               path=tests/olm/
               export CATALOG_SOURCE="$(params.CATALOG_SOURCE)" CHANNEL="$(params.CHANNEL)"
-              if [[ "$tags" == install || "$tags" == upgrade ]]; then
+              if [[ "$tags" == install && "${INSTALL_LATEST:-false}" == true ]]; then
+                unpin_subscription_template
+              elif [[ "$tags" == install || "$tags" == upgrade ]]; then
                 pin_subscription_template "${OSP_VER}"
-                approve_starting_csv_installplan "${OSP_VER}" &
               fi
               ;;
           esac
@@ -608,6 +831,10 @@ spec:
 
         OSP_VER="$(params.OSP_VERSION)"
         [[ -n "$OSP_VER" ]] || { echo "ERROR: OSP_VERSION required"; exit 1; }
+        # OSP_VERSION=latest (pre-upgrade) → install the head of CHANNEL (latest
+        # z-stream, no startingCSV pin) instead of pinning an exact version.
+        INSTALL_LATEST=false
+        [[ "${OSP_VER,,}" == latest ]] && INSTALL_LATEST=true
         CLI_ARCH=$(pod_arch)
 
         if [[ "$FRAMEWORK" == ginkgo ]]; then
@@ -627,9 +854,14 @@ spec:
         [[ -f go.mod ]] || { echo "ERROR: go.mod missing in $(pwd)"; ls -la; exit 1; }
         use_gomod_cache
         prepare_toolchain
-        echo "Toolchain ready (oc/tkn ephemeral; go modules + gauge/ginkgo from shared PVC cache)"
-        require_tools
-        echo "Tools verified"
+        echo "Toolchain ready (oc ephemeral; go modules + gauge/ginkgo from shared PVC cache)"
+        tags="$(params.TAGS)"
+        if [[ "$tags" == upgrade || "$tags" == post-upgrade ]]; then
+          require_tools skip-cli
+        else
+          require_tools
+          echo "Tools verified"
+        fi
 
         taskRunName=$(oc get taskrun "${TASKRUN_NAME}" -n "${TASKRUN_NAMESPACE}" \
           -o json 2>/dev/null | jq -r '.metadata.labels["tekton.dev/pipelineTask"] // empty' || true)
@@ -663,6 +895,43 @@ spec:
         fi
 
         tags="$(params.TAGS)"
+        # Install/upgrade: wait for target CSV (Manual InstallPlan) before tests or tkn/opc download.
+        if [[ "$tags" == install ]]; then
+          ensure_operator_csv "${OSP_VER}"
+        elif [[ "$tags" == upgrade ]]; then
+          ensure_operator_csv "${OSP_VER}" upgrade
+        fi
+        # Channel-head installs (pre-upgrade) and upgrades resolve to whatever z-stream
+        # OLM picks — reconcile OSP_VERSION to the actually installed CSV so version
+        # assertions match reality instead of the requested (possibly older) pin.
+        if [[ ( "$tags" == install && "${INSTALL_LATEST:-false}" == true ) || "$tags" == upgrade || "$tags" == *pre-upgrade* ]]; then
+          actual=$(resolve_installed_osp_version || true)
+          if [[ -n "$actual" ]]; then
+            [[ "$actual" != "$OSP_VER" ]] && echo "Reconciling OSP_VERSION: requested=${OSP_VER} installed=${actual}"
+            OSP_VER="$actual"
+            export OSP_VERSION="$OSP_VER"
+          else
+            echo "WARN: could not resolve installed CSV version; keeping OSP_VERSION=${OSP_VER}"
+          fi
+        fi
+        if [[ "$tags" == upgrade ]]; then
+          # Operator is now at UPGRADE_VERSION. Pull the upgraded opc/tkn and refresh
+          # the shared PVC cache so this task AND all consecutive tasks (e2e, versions,
+          # pipelines, ...) validate with the upgraded CLI, not the cached pre-upgrade one.
+          refresh_cli_from_upgraded_cluster
+          require_tools
+          echo "Tools verified"
+          echo "  tkn: $(command -v tkn)  opc: $(command -v opc)"
+        elif [[ "$tags" == post-upgrade ]]; then
+          echo "Downloading tkn/opc from cluster after operator ${OSP_VER}"
+          rm -f "/tmp/tkn-linux-${CLI_ARCH}.tar.gz"
+          install_tkn
+          hash -r 2>/dev/null || true
+          require_tools
+          echo "Tools verified"
+          echo "  tkn: $(command -v tkn)  opc: $(command -v opc)"
+        fi
+
         case "$FRAMEWORK" in
           gauge)  run_gauge "$tags" ;;
           ginkgo) run_ginkgo "$tags" ;;

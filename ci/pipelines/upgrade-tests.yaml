@@ -371,8 +371,11 @@ spec:
         value: $(params.IMAGE)
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
+      # Pre-upgrade must sit at the channel head (latest z-stream) so OLM can cross
+      # to the next minor — install the latest on PRE_UPGRADE_CHANNEL, not a pinned
+      # version. OSP_VERSION=latest tells release-tests to skip the startingCSV pin.
       - name: OSP_VERSION
-        value: $(params.PRE_UPGRADE_VERSION)
+        value: "latest"
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -551,7 +554,7 @@ spec:
       - configure-operator-upgrade
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     workspaces:
     - name: release-tests-git
       workspace: data
