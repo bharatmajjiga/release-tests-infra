@@ -546,7 +546,7 @@ spec:
       - name: SPECS
         value: "specs/olm.spec"
       - name: TAGS
-        value: "install"
+        value: "upgrade"
     runAfter:
       - configure-operator-upgrade
     taskRef:
