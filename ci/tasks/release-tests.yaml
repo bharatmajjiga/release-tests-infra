@@ -217,6 +217,20 @@ spec:
             [[ -n "$tkn_host" ]] && cluster_url="https://${tkn_host}/tkn/tkn-linux-${CLI_ARCH}.tar.gz"
           fi
 
+          # oc-based fallback: this task authenticates via `oc login` (ADMIN_TOKEN is
+          # often empty when logging in with kubeadmin), so query the cluster with oc.
+          if [[ -z "$cluster_url" ]] && command -v oc >/dev/null 2>&1; then
+            cluster_url=$(oc get consoleclidownloads.console.openshift.io tkn \
+              -o jsonpath='{.spec.links[*].href}' 2>/dev/null \
+              | tr ' ' '\n' | grep -m1 "tkn-linux-${CLI_ARCH}\.tar\.gz") || true
+            if [[ -z "$cluster_url" ]]; then
+              local oc_tkn_host
+              oc_tkn_host=$(oc get route tkn-cli-serve -n openshift-pipelines \
+                -o jsonpath='{.spec.host}' 2>/dev/null) || true
+              [[ -n "$oc_tkn_host" ]] && cluster_url="https://${oc_tkn_host}/tkn/tkn-linux-${CLI_ARCH}.tar.gz"
+            fi
+          fi
+
           if [[ -n "$cluster_url" ]]; then
             echo "$cluster_url"
           else
@@ -271,20 +285,38 @@ spec:
           echo "  opc version: $(${TOOLS_BIN}/opc version 2>/dev/null | head -1 || echo unknown)"
         }
 
-        # Called only after the operator CSV reaches Succeeded during an upgrade.
-        # tkn-cli-serve now serves the upgraded (UPGRADE_VERSION) binaries, so we
-        # force a fresh download and also overwrite the shared PVC copy so every
-        # consecutive TaskRun uses the upgraded opc/tkn instead of the cached one.
         refresh_cli_from_upgraded_cluster() {
-          local url archive tmp jar t
+          local expected="${1:-}"
+          local url archive tmp jar t want served deadline matched=false
+          want="${expected%.*}"   # target minor, e.g. 1.24
           url=$(resolve_tkn_url "$(params.TKN_DOWNLOAD_URL)")
           archive="/tmp/tkn-linux-${CLI_ARCH}.tar.gz"
-          rm -f "$archive"
-          echo "Operator upgraded — downloading tkn/opc from upgraded cluster: ${url}"
-          tmp="${archive}.part.$$"; jar=$(mktemp)
-          curl -kfsSL -c "$jar" -b "$jar" "$url" -o "$tmp" && rm -f "$jar" && mv "$tmp" "$archive"
-          tar xzf "$archive" -C "$TOOLS_BIN" --strip-components=1
-          hash -r
+          echo "Waiting for tkn-cli-serve to serve the upgraded CLI (want ${want:-any}.x) from ${url}"
+          deadline=$((SECONDS + 600))
+          while (( SECONDS < deadline )); do
+            # Wait for the operator's re-roll of tkn-cli-serve to complete.
+            oc rollout status deployment/tkn-cli-serve -n openshift-pipelines --timeout=120s 2>/dev/null || true
+            rm -f "$archive"
+            tmp="${archive}.part.$$"; jar=$(mktemp)
+            if curl -kfsSL -c "$jar" -b "$jar" "$url" -o "$tmp" 2>/dev/null; then
+              rm -f "$jar"; mv "$tmp" "$archive"
+              tar xzf "$archive" -C "$TOOLS_BIN" --strip-components=1 2>/dev/null || true
+              hash -r
+              served=$(${TOOLS_BIN}/opc version 2>/dev/null | sed -n 's/.*Client:[[:space:]]*//p' | head -1)
+              if [[ -z "$want" || "$served" == "${want}."* || "$served" == "$want" ]]; then
+                echo "Operator upgraded — tkn-cli-serve serving opc ${served:-unknown}"
+                matched=true
+                break
+              fi
+              echo "  tkn-cli-serve still serving opc ${served:-unknown} (want ${want}.x); retrying..."
+            else
+              rm -f "$jar" "$tmp"
+              echo "  tkn-cli-serve route not ready yet; retrying..."
+            fi
+            sleep 10
+          done
+          [[ "$matched" == true ]] \
+            || echo "WARN: tkn-cli-serve did not serve ${want:-target}.x within timeout; using opc ${served:-unknown}"
           echo "  tkn version: $(${TOOLS_BIN}/tkn version 2>/dev/null | head -1 || echo unknown)"
           echo "  opc version: $(${TOOLS_BIN}/opc version 2>/dev/null | head -1 || echo unknown)"
 
@@ -918,15 +950,21 @@ spec:
           # Operator is now at UPGRADE_VERSION. Pull the upgraded opc/tkn and refresh
           # the shared PVC cache so this task AND all consecutive tasks (e2e, versions,
           # pipelines, ...) validate with the upgraded CLI, not the cached pre-upgrade one.
-          refresh_cli_from_upgraded_cluster
+          refresh_cli_from_upgraded_cluster "${OSP_VER}"
           require_tools
           echo "Tools verified"
           echo "  tkn: $(command -v tkn)  opc: $(command -v opc)"
         elif [[ "$tags" == post-upgrade ]]; then
-          echo "Downloading tkn/opc from cluster after operator ${OSP_VER}"
-          rm -f "/tmp/tkn-linux-${CLI_ARCH}.tar.gz"
-          install_tkn
-          hash -r 2>/dev/null || true
+          want="${OSP_VER%.*}"
+          served=$(opc version 2>/dev/null | sed -n 's/.*Client:[[:space:]]*//p' | head -1)
+          if [[ "$served" == "${want}."* || "$served" == "$want" ]]; then
+            echo "Reusing upgraded opc ${served} from shared cache after operator ${OSP_VER}"
+          else
+            echo "Cached opc is ${served:-missing} (want ${want}.x); downloading tkn/opc from cluster"
+            rm -f "/tmp/tkn-linux-${CLI_ARCH}.tar.gz"
+            install_tkn
+            hash -r 2>/dev/null || true
+          fi
           require_tools
           echo "Tools verified"
           echo "  tkn: $(command -v tkn)  opc: $(command -v opc)"
