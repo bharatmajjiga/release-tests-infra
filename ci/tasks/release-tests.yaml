@@ -17,6 +17,9 @@ spec:
     default: "quay.io/openshift-pipeline/chainstest"
   - name: CHANNEL
     default: stable
+  - name: CHANNEL_VERSION
+    description: "x.y.z hint used to derive pipelines-<x.y> when CHANNEL is empty (e.g. OSP_VERSION=latest installs). Ignored when CHANNEL is set."
+    default: ""
   - name: CLUSTER_NAME
   - name: FAIL_ON_ERROR
     default: "false"
@@ -671,7 +674,7 @@ spec:
           local mode="${2:-}"
           local csv="openshift-pipelines-operator-rh.v${ver}"
           local channel src
-          channel="$(params.CHANNEL)"
+          channel="${CHANNEL}"
           src="$(params.CATALOG_SOURCE)"
 
           # Unpinned path — used for both:
@@ -747,7 +750,7 @@ spec:
               pin_subscription_template "${OSP_VER}"
             fi
             gauge_reports_dir="${report_path}" logs_directory="${report_path}" \
-              CATALOG_SOURCE="$(params.CATALOG_SOURCE)" CHANNEL="$(params.CHANNEL)" \
+              CATALOG_SOURCE="$(params.CATALOG_SOURCE)" CHANNEL="${CHANNEL}" \
               IS_DISCONNECTED="$(params.IS_DISCONNECTED)" \
               gauge run --tags="${tags}" --log-level=debug --verbose "${target}" 2>&1 | tee "$log"
             wait || true
@@ -774,7 +777,7 @@ spec:
           case "$tags" in
             install|uninstall|upgrade)
               path=tests/olm/
-              export CATALOG_SOURCE="$(params.CATALOG_SOURCE)" CHANNEL="$(params.CHANNEL)"
+              export CATALOG_SOURCE="$(params.CATALOG_SOURCE)" CHANNEL="${CHANNEL}"
               if [[ "$tags" == install && "${INSTALL_LATEST:-false}" == true ]]; then
                 unpin_subscription_template
               elif [[ "$tags" == install || "$tags" == upgrade ]]; then
@@ -867,6 +870,24 @@ spec:
         # z-stream, no startingCSV pin) instead of pinning an exact version.
         INSTALL_LATEST=false
         [[ "${OSP_VER,,}" == latest ]] && INSTALL_LATEST=true
+
+        # Resolve the OLM channel once for both the subscription (ensure_operator_csv)
+        # and the gauge/ginkgo install specs. If CHANNEL is empty, derive
+        # pipelines-<major.minor> from CHANNEL_VERSION (e.g. pre-upgrade passes the
+        # requested version while OSP_VERSION=latest), falling back to OSP_VERSION when
+        # it is a concrete x.y.z (e.g. the upgrade step).
+        CHANNEL="$(params.CHANNEL)"
+        if [[ -z "$CHANNEL" ]]; then
+          chver="$(params.CHANNEL_VERSION)"
+          [[ -z "$chver" ]] && chver="$OSP_VER"
+          if [[ "$chver" =~ ^[0-9]+\.[0-9]+ ]]; then
+            CHANNEL="pipelines-${chver%.*}"
+            echo "Derived OLM channel ${CHANNEL} from version ${chver}"
+          else
+            echo "WARN: CHANNEL empty and no concrete version to derive it from (CHANNEL_VERSION='$(params.CHANNEL_VERSION)', OSP_VERSION='${OSP_VER}')"
+          fi
+        fi
+        export CHANNEL
         CLI_ARCH=$(pod_arch)
 
         if [[ "$FRAMEWORK" == ginkgo ]]; then

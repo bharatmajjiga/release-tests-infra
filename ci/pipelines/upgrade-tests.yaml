@@ -79,7 +79,7 @@ spec:
   - name: PRE_UPGRADE_KONFLUX_INDEX_IMAGE
     default: ""
   - name: PRE_UPGRADE_CHANNEL
-    description: "OLM channel for pre-upgrade (auto-derived if empty)"
+    description: "OLM channel for pre-upgrade. If empty, derived as pipelines-<major.minor> from PRE_UPGRADE_VERSION."
     default: ""
 
   # --- Upgrade operator ---
@@ -92,7 +92,7 @@ spec:
   - name: UPGRADE_KONFLUX_INDEX_IMAGE
     default: ""
   - name: UPGRADE_CHANNEL
-    description: "OLM channel for upgrade (auto-derived if empty)"
+    description: "OLM channel for upgrade. If empty, derived as pipelines-<major.minor> from UPGRADE_VERSION."
     default: ""
 
   # --- Post-test ---
@@ -376,6 +376,10 @@ spec:
       # version. OSP_VERSION=latest tells release-tests to skip the startingCSV pin.
       - name: OSP_VERSION
         value: "latest"
+      # When PRE_UPGRADE_CHANNEL is empty, derive pipelines-<major.minor> from this
+      # so e.g. PRE_UPGRADE_VERSION=1.22.4 installs the head of pipelines-1.22 (1.22.5).
+      - name: CHANNEL_VERSION
+        value: $(params.PRE_UPGRADE_VERSION)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
