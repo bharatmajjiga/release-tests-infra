@@ -79,7 +79,7 @@ spec:
   - name: PRE_UPGRADE_KONFLUX_INDEX_IMAGE
     default: ""
   - name: PRE_UPGRADE_CHANNEL
-    description: "OLM channel for pre-upgrade (auto-derived if empty)"
+    description: "OLM channel for pre-upgrade. If empty, derived as pipelines-<major.minor> from PRE_UPGRADE_VERSION."
     default: ""
 
   # --- Upgrade operator ---
@@ -92,7 +92,7 @@ spec:
   - name: UPGRADE_KONFLUX_INDEX_IMAGE
     default: ""
   - name: UPGRADE_CHANNEL
-    description: "OLM channel for upgrade (auto-derived if empty)"
+    description: "OLM channel for upgrade. If empty, derived as pipelines-<major.minor> from UPGRADE_VERSION."
     default: ""
 
   # --- Post-test ---
@@ -371,7 +371,14 @@ spec:
         value: $(params.IMAGE)
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
+      # Pre-upgrade must sit at the channel head (latest z-stream) so OLM can cross
+      # to the next minor — install the latest on PRE_UPGRADE_CHANNEL, not a pinned
+      # version. OSP_VERSION=latest tells release-tests to skip the startingCSV pin.
       - name: OSP_VERSION
+        value: "latest"
+      # When PRE_UPGRADE_CHANNEL is empty, derive pipelines-<major.minor> from this
+      # so e.g. PRE_UPGRADE_VERSION=1.22.4 installs the head of pipelines-1.22 (1.22.5).
+      - name: CHANNEL_VERSION
         value: $(params.PRE_UPGRADE_VERSION)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
@@ -551,7 +558,7 @@ spec:
       - configure-operator-upgrade
     taskRef:
       name: release-tests
-    timeout: 30m
+    timeout: 1h
     workspaces:
     - name: release-tests-git
       workspace: data
