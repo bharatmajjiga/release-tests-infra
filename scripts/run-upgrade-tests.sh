@@ -101,9 +101,16 @@ command -v oc >/dev/null || die "oc CLI required"
 NS="${NAMESPACE:-pipelines-ci}"
 INSTALLER="${INSTALLER:-aws-ipi}"
 
+ensure_namespace() {
+  oc get namespace "$NS" &>/dev/null \
+    && echo "Namespace ${NS} exists" \
+    || { echo "Creating namespace ${NS}..."; oc new-project "$NS"; }
+}
+
 # For existing clusters: auto-detect OCP version
 if is_existing_cluster; then
   cluster_login || die "cluster login failed"
+  ensure_namespace
   if [[ -z "${OPENSHIFT_VERSION:-}" || "${OPENSHIFT_VERSION}" == stable* ]]; then
     OPENSHIFT_VERSION=$(oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null || true)
     [[ -n "$OPENSHIFT_VERSION" ]] || die "Could not detect OCP version from cluster"
@@ -132,25 +139,10 @@ case "${INSTALLER,,}" in
     ;;
   *)
     if is_existing_cluster && ! cluster_secret_exists "$NS"; then
-      echo "Cluster secret missing — auto-creating from ${ENV_FILE}..."
+      echo "Cluster secret missing — running create-secrets.sh..."
       validate_cluster_env || missing+=("cluster connection (set APISERVER + KUBEADMIN_PASSWORD in ${ENV_FILE})")
       if [[ ${#missing[@]} -eq 0 ]]; then
-        cluster_login || missing+=("cluster login failed")
-      fi
-      if [[ ${#missing[@]} -eq 0 ]]; then
-        _secret="$(cluster_secret_name)"
-        oc create secret generic "$_secret" \
-          --from-literal=admin-name="$(cluster_admin_name)" \
-          --from-literal=api-url="${APISERVER}" \
-          --from-literal=admin-token="$(cluster_admin_token)" \
-          --from-literal=kubeadmin-password="${KUBEADMIN_PASSWORD:-}" \
-          --from-literal=user-password="${USER_PASSWORD:-user}" \
-          --from-literal=insecure-skip-tls-verify=true \
-          --from-literal=installer="${INSTALLER:-none}" \
-          --from-literal=mirror-reg=quay.io \
-          -n "$NS"
-        oc label secret "$_secret" keep-cluster=true -n "$NS" --overwrite
-        echo "Created cluster secret ${_secret}"
+        NAMESPACE="$NS" bash "$HACK_DIR/create-secrets.sh" || missing+=("create-secrets.sh failed")
       fi
     fi
     ;;
