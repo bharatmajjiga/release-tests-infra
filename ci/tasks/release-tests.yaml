@@ -110,6 +110,12 @@ spec:
               name: quay-io-dockerconfig
               key: config.json
               optional: true
+        - name: JIB_MAVEN_DOCKER_CONFIG_JSON
+          valueFrom:
+            secretKeyRef:
+              name: quay-io-dockerconfig
+              key: config.json
+              optional: true
         - name: ADMIN_NAME
           valueFrom:
             secretKeyRef:
