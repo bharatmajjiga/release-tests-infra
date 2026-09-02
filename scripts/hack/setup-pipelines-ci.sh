@@ -26,7 +26,7 @@ Usage: $0 [--cluster-secret-only] [--force]
   INSTALLER=cluster-platforms → cluster-ca-cert, OC_TOKEN in secret
   INSTALLER=none            → skips update if secret already has installer=cluster-platforms
 
-  INSTALL_PIPELINES_OPERATOR=true runs operator install before Tekton apply (default from env/.env)
+  INSTALL_PIPELINES_OPERATOR=true runs operator install + verify before Tekton apply (default from .env)
 EOF
       exit 0 ;;
     *) echo "ERROR: unknown arg: $1" >&2; exit 1 ;;
@@ -95,12 +95,28 @@ EOF
   oc apply -f "$yaml"
   rm -f "$yaml"
   echo "Waiting for CatalogSource ${src}..."
-  if ! oc wait "catalogsource/${src}" -n openshift-marketplace --for=condition=Ready --timeout=5m 2>/dev/null; then
-    pod=$(oc get pods -n openshift-marketplace --sort-by='{.metadata.creationTimestamp}' -o name \
-      | grep "${src}" | tail -1 || true)
-    [[ -n "$pod" ]] || die "no catalog pod for ${src}"
-    oc wait --for=condition=Ready -n openshift-marketplace "$pod" --timeout=5m
-  fi
+  local deadline=$((SECONDS + 600)) state="" pod=""
+  while (( SECONDS < deadline )); do
+    state=$(oc get "catalogsource/${src}" -n openshift-marketplace \
+      -o jsonpath='{.status.connectionState.lastObservedState}' 2>/dev/null || true)
+    if [[ "$state" == READY ]]; then
+      echo "CatalogSource ${src} is READY"
+      return 0
+    fi
+    pod=$(oc get pods -n openshift-marketplace -l "olm.catalogSource=${src}" \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    if [[ -n "$pod" ]]; then
+      oc wait --for=condition=Ready "pod/${pod}" -n openshift-marketplace --timeout=60s 2>/dev/null || true
+      state=$(oc get "catalogsource/${src}" -n openshift-marketplace \
+        -o jsonpath='{.status.connectionState.lastObservedState}' 2>/dev/null || true)
+      [[ "$state" == READY ]] && { echo "CatalogSource ${src} is READY"; return 0; }
+      echo "  catalog pod ${pod} up; connectionState=${state:-Unknown}..."
+    else
+      echo "  waiting for catalog pod (connectionState=${state:-Unknown})..."
+    fi
+    sleep 10
+  done
+  die "CatalogSource ${src} not ready after 10m (connectionState=${state:-Unknown})"
 }
 
 install_pipelines_operator() {
@@ -204,5 +220,7 @@ fi
 echo "=== Setup complete ==="
 echo "Run acceptance tests:"
 echo "  ./scripts/hack/create-pipelinerun.sh"
+echo "Run UI acceptance tests:"
+echo "  ENV_FILE=env/.env.acceptance-ui ./scripts/run-ui-workflow.sh"
 echo "Run upgrade tests (INSTALLER=aws-ipi):"
 echo "  ./scripts/run-upgrade-tests.sh"

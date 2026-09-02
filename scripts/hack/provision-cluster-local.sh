@@ -160,15 +160,22 @@ echo "  Local arch:   ${LOCAL_ARCH} (${LOCAL_ARCH_SHORT})"
 echo "  Install dir:  ${INSTALL_DIR}"
 echo "============================================================"
 
-# --- Download openshift-install ---
+# --- Resolve release and download openshift-install ---
 MIRROR="https://mirror.openshift.com/pub/openshift-v4"
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 
+OCP_RELEASE=$(curl -sfL "${MIRROR}/${LOCAL_ARCH_SHORT}/clients/ocp/${OCP_VERSION}/release.txt" \
+  | sed -n 's/^Name:[[:space:]]*//p' | head -1) || true
+[[ -n "$OCP_RELEASE" ]] || die "Could not resolve release for ${OCP_VERSION} (check mirror path)"
+
+echo "  Resolved:     ${OCP_RELEASE}"
+echo "============================================================"
+
 if [[ "$FIPS" == true ]]; then
-  INSTALL_BIN="${REPO_ROOT}/.clusters/bin/openshift-install-rhel9-${LOCAL_ARCH_SHORT}"
+  INSTALL_BIN="${REPO_ROOT}/.clusters/bin/openshift-install-rhel9-${LOCAL_ARCH_SHORT}-${OCP_RELEASE}"
   [[ "$OS" == darwin ]] && USE_CONTAINER_FIPS=true
 else
-  INSTALL_BIN="${REPO_ROOT}/.clusters/bin/openshift-install-${LOCAL_ARCH_SHORT}"
+  INSTALL_BIN="${REPO_ROOT}/.clusters/bin/openshift-install-${LOCAL_ARCH_SHORT}-${OCP_RELEASE}"
 fi
 
 if [[ ! -x "$INSTALL_BIN" ]] || [[ "${FORCE_DOWNLOAD:-}" == true ]]; then
@@ -197,6 +204,8 @@ if [[ ! -x "$INSTALL_BIN" ]] || [[ "${FORCE_DOWNLOAD:-}" == true ]]; then
     mv "$(dirname "$INSTALL_BIN")/openshift-install" "$INSTALL_BIN"
   fi
   chmod +x "$INSTALL_BIN"
+else
+  echo "Using cached openshift-install: ${INSTALL_BIN}"
 fi
 
 # FIPS on Mac: the RHEL9 binary is Linux ELF, needs podman/docker to run
@@ -239,15 +248,9 @@ run_installer version 2>&1
 if [[ "$TARGET_ARCH" != "$LOCAL_ARCH_SHORT" ]]; then
   echo ""
   echo "=== Cross-arch provisioning: ${LOCAL_ARCH_SHORT} → ${TARGET_ARCH} ==="
-  OCP_VER=$(curl -sL "${MIRROR}/${LOCAL_ARCH_SHORT}/clients/ocp/${OCP_VERSION}/release.txt" \
-    | sed -n 's/^Name:[[:space:]]*//p' | head -1) || true
-  if [[ -n "$OCP_VER" ]]; then
-    MULTI_IMAGE="quay.io/openshift-release-dev/ocp-release:${OCP_VER}-multi"
-    export OPENSHIFT_INSTALL_RELEASE_IMAGE_OVERRIDE="$MULTI_IMAGE"
-    echo "  Using multi-arch release: ${MULTI_IMAGE}"
-  else
-    die "Could not determine OCP version for multi-arch release"
-  fi
+  MULTI_IMAGE="quay.io/openshift-release-dev/ocp-release:${OCP_RELEASE}-multi"
+  export OPENSHIFT_INSTALL_RELEASE_IMAGE_OVERRIDE="$MULTI_IMAGE"
+  echo "  Using multi-arch release: ${MULTI_IMAGE}"
 fi
 
 # --- Generate install-config.yaml ---
