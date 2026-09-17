@@ -34,10 +34,15 @@ is_enabled() {
 
 load_post_test_flags() {
   SEND_SLACK_NOTIFICATION=$(normalize_bool "$(env_file_get SEND_SLACK_NOTIFICATION "$ENV_FILE")")
-  INSTALL_PIPELINES_OPERATOR=$(normalize_bool "$(env_file_get INSTALL_PIPELINES_OPERATOR "$ENV_FILE")")
-  UNINSTALL_PIPELINES_OPERATOR=$(normalize_bool "$(env_file_get UNINSTALL_PIPELINES_OPERATOR "$ENV_FILE")")
+  # Infra installs OSP (setup-pipelines-ci). Always tell the UI framework not to install.
+  INSTALL_PIPELINES_OPERATOR=false
+  INSTALL_LOGGING_OPERATOR=$(normalize_bool "$(env_file_get INSTALL_LOGGING_OPERATOR "$ENV_FILE")")
+  INSTALL_SERVERLESS_OPERATOR=$(normalize_bool "$(env_file_get INSTALL_SERVERLESS_OPERATOR "$ENV_FILE")")
   SETUP_TESTING_ACCOUNTS=$(normalize_bool "$(env_file_get SETUP_TESTING_ACCOUNTS "$ENV_FILE")")
-  export SEND_SLACK_NOTIFICATION INSTALL_PIPELINES_OPERATOR UNINSTALL_PIPELINES_OPERATOR SETUP_TESTING_ACCOUNTS
+  OSP_INSTALL_METHOD="$(env_file_get OSP_INSTALL_METHOD "$ENV_FILE" || true)"
+  OSP_INSTALL_METHOD="${OSP_INSTALL_METHOD:-ui}"
+  export SEND_SLACK_NOTIFICATION INSTALL_PIPELINES_OPERATOR INSTALL_LOGGING_OPERATOR \
+    INSTALL_SERVERLESS_OPERATOR SETUP_TESTING_ACCOUNTS OSP_INSTALL_METHOD
 }
 
 _SAVED_MARKERS="" _HAS_MARKERS=""
@@ -107,16 +112,6 @@ resolve_from_ci_config() {
     export CHANNEL
   fi
 
-  if [[ -z "${GIT_RELEASE_TESTS_BRANCH:-}" ]]; then
-    GIT_RELEASE_TESTS_BRANCH=$(ci_config_get "$ver" release-tests.revision) || true
-    export GIT_RELEASE_TESTS_BRANCH
-  fi
-
-  if [[ -z "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]]; then
-    GIT_RELEASE_TESTS_GINKGO_BRANCH=$(ci_config_get "$ver" release-tests-ginkgo.revision) || true
-    export GIT_RELEASE_TESTS_GINKGO_BRANCH
-  fi
-
   if [[ -z "${GIT_UI_TESTS_BRANCH:-}" ]]; then
     local ocp_ver branch
     ocp_ver=$(detect_ocp_minor) || true
@@ -167,6 +162,9 @@ Usage: $0
 Creates an acceptance-ui-tests PipelineRun and exits immediately.
 Env file: ENV_FILE=env/.env.acceptance-ui (default)
 
+OSP / logging / serverless install is handled inside release-ui-tests (flags are
+passed through as Pipeline params / env). Infra no longer runs release-tests install.
+
 The pipeline finally task cleanup-pipelinerun removes the PipelineRun after optional slack notification.
 Workspace PVC cleanup: ./scripts/hack/cleanup-pipeline-pvcs.sh --finished
 EOF
@@ -205,30 +203,30 @@ spec:
       value: "${CLUSTER_LIFETIME:-6h}"
     - name: ARCH
       value: "${ARCH:-linux/amd64}"
-    - name: CATALOG_SOURCE
-      value: "${CATALOG_SOURCE:-custom-operators}"
     - name: CHANNEL
       value: "${CHANNEL}"
     - name: CLUSTER_NAME
       value: "${CLUSTER_NAME}"
-    - name: GIT_RELEASE_TESTS_BRANCH
-      value: "${GIT_RELEASE_TESTS_BRANCH:-}"
-    - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
-      value: "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}"
+    - name: API_URL
+      value: "${API_URL:-${APISERVER}}"
+    - name: CONSOLE_URL
+      value: "${CONSOLE_URL}"
+    - name: CONSOLE_USERNAME
+      value: "${CONSOLE_USERNAME:-${KUBEADMIN_USER:-kubeadmin}}"
     - name: GIT_UI_TESTS_URI
       value: "${GIT_UI_TESTS_URI:-https://github.com/openshift-pipelines/release-ui-tests.git}"
     - name: GIT_UI_TESTS_BRANCH
       value: "${GIT_UI_TESTS_BRANCH:-}"
-    - name: TEST_FRAMEWORK
-      value: "${FW}"
-    - name: IMAGE
-      value: "${IMAGE:-quay.io/openshift-pipeline/ci:latest}"
     - name: UI_IMAGE
       value: "${UI_IMAGE:-quay.io/openshift-pipeline/ui-ci:latest}"
-    - name: TKN_DOWNLOAD_URL
-      value: "${TKN_DOWNLOAD_URL:-}"
     - name: INSTALL_PIPELINES_OPERATOR
-      value: "${INSTALL_PIPELINES_OPERATOR:-true}"
+      value: "false"
+    - name: OSP_INSTALL_METHOD
+      value: "${OSP_INSTALL_METHOD:-ui}"
+    - name: INSTALL_LOGGING_OPERATOR
+      value: "${INSTALL_LOGGING_OPERATOR:-false}"
+    - name: INSTALL_SERVERLESS_OPERATOR
+      value: "${INSTALL_SERVERLESS_OPERATOR:-false}"
     - name: SETUP_TESTING_ACCOUNTS
       value: "${SETUP_TESTING_ACCOUNTS:-false}"
     - name: KONFLUX_INDEX_IMAGE
@@ -245,14 +243,14 @@ spec:
       value: "${PYTEST_ARGS:-}"
     - name: APP_TIMEOUT
       value: "${APP_TIMEOUT:-90000}"
+    - name: AUTH_TYPE
+      value: "${AUTH_TYPE:-kube:admin}"
     - name: CAPTURE_SCREENSHOTS
       value: "${CAPTURE_SCREENSHOTS:-true}"
     - name: CAPTURE_RECORDINGS
       value: "${CAPTURE_RECORDINGS:-true}"
     - name: UPLOAD_RECORDINGS_ON_FAILURE
       value: "${UPLOAD_RECORDINGS_ON_FAILURE:-false}"
-    - name: UNINSTALL_PIPELINES_OPERATOR
-      value: "${UNINSTALL_PIPELINES_OPERATOR:-false}"
     - name: SEND_SLACK_NOTIFICATION
       value: "${SEND_SLACK_NOTIFICATION}"
   timeouts:
@@ -270,13 +268,16 @@ preflight() {
   command -v oc >/dev/null || die "oc CLI required"
 
   NS="${NAMESPACE:-pipelines-ci}"
-  FW="$(printf '%s' "${TEST_FRAMEWORK:-gauge}" | tr '[:upper:]' '[:lower:]')"
 
-  for v in CLUSTER_NAME OPERATOR_VERSION; do
+  for v in CLUSTER_NAME OPERATOR_VERSION CONSOLE_URL; do
     [[ -n "${!v:-}" ]] || die "$v required in $ENV_FILE"
   done
-
-  case "$FW" in gauge|ginkgo) ;; *) die "TEST_FRAMEWORK must be gauge or ginkgo (got: ${TEST_FRAMEWORK})" ;; esac
+  [[ -n "${API_URL:-}${APISERVER:-}" ]] \
+    || die "API_URL required in $ENV_FILE"
+  [[ -n "${CONSOLE_USERNAME:-}${KUBEADMIN_USER:-}" ]] \
+    || die "CONSOLE_USERNAME required in $ENV_FILE"
+  [[ -n "${CONSOLE_PASSWORD:-}${KUBEADMIN_PASSWORD:-}${OC_TOKEN:-}" ]] \
+    || die "CONSOLE_PASSWORD (or OC_TOKEN) required in $ENV_FILE"
 
   validate_operator_env || exit 1
 
@@ -306,10 +307,6 @@ load_env
 preflight
 resolve_from_ci_config
 
-[[ "$FW" != ginkgo || -n "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]] \
-  || die "GIT_RELEASE_TESTS_GINKGO_BRANCH required for ginkgo (set in $ENV_FILE or add to ci-config.yaml)"
-[[ "$FW" != gauge || -n "${GIT_RELEASE_TESTS_BRANCH:-}" ]] \
-  || die "GIT_RELEASE_TESTS_BRANCH required for gauge (set in $ENV_FILE or add to ci-config.yaml)"
 [[ -n "${GIT_UI_TESTS_BRANCH:-}" ]] \
   || die "GIT_UI_TESTS_BRANCH required (set in $ENV_FILE, OPENSHIFT_VERSION=4.xx, or add to ci-config.yaml)"
 
@@ -328,13 +325,14 @@ if command -v oc &>/dev/null; then
     | sed 's/\([0-9]*\)\.\([0-9]*\).*/\1\2/' || true)
 fi
 [[ -z "$_ocp_short" ]] && _ocp_short="ocp"
-_fw_tag="$([ "$FW" = ginkgo ] && echo ginkgo- || echo "")"
-PREFIX="acceptance-ui-tests-${_installer_tag}${_fw_tag}${_osp_short}-${_env_short}-on-${_ocp_short}-"
+PREFIX="acceptance-ui-tests-${_installer_tag}${_osp_short}-${_env_short}-on-${_ocp_short}-"
 
-echo "=== PipelineRun → ${NS}  pipeline=acceptance-ui-tests  framework=${FW}  installer=${INSTALLER:-cluster-platforms}  cluster=${CLUSTER_NAME}  operator=${OPERATOR_VERSION}  channel=${CHANNEL}  ui-tests-branch=${GIT_UI_TESTS_BRANCH} ==="
+echo "=== PipelineRun → ${NS}  pipeline=acceptance-ui-tests  installer=${INSTALLER:-cluster-platforms}  cluster=${CLUSTER_NAME}  operator=${OPERATOR_VERSION}  channel=${CHANNEL}  ui-tests-branch=${GIT_UI_TESTS_BRANCH} ==="
+echo "    console: ${CONSOLE_URL}  user=${CONSOLE_USERNAME:-${KUBEADMIN_USER:-kubeadmin}}"
 echo "    markers: ${MARKERS}"
-echo "    app_timeout: ${APP_TIMEOUT:-90000}  capture_screenshots: ${CAPTURE_SCREENSHOTS:-true}  capture_recordings: ${CAPTURE_RECORDINGS:-true}  upload_recordings_on_failure: ${UPLOAD_RECORDINGS_ON_FAILURE:-false}"
-echo "    install via pipeline: ${INSTALL_PIPELINES_OPERATOR:-true}"
+echo "    app_timeout: ${APP_TIMEOUT:-90000}  auth_type: ${AUTH_TYPE:-kube:admin}  capture_screenshots: ${CAPTURE_SCREENSHOTS:-true}  capture_recordings: ${CAPTURE_RECORDINGS:-true}  upload_recordings_on_failure: ${UPLOAD_RECORDINGS_ON_FAILURE:-false}"
+echo "    framework INSTALL_PIPELINES_OPERATOR=false (OSP installed by infra)"
+echo "    framework logging=${INSTALL_LOGGING_OPERATOR:-false}  serverless=${INSTALL_SERVERLESS_OPERATOR:-false}  method=${OSP_INSTALL_METHOD:-ui}"
 echo "    setup testing accounts: ${SETUP_TESTING_ACCOUNTS:-false}"
 echo "    slack notification: ${SEND_SLACK_NOTIFICATION}"
 

@@ -149,6 +149,8 @@ This:
 2. `setup-pipelines-ci.sh` — namespace, cluster secret, Tekton tasks + pipelines
 3. `create-pipelinerun-ui.sh` — submits the `acceptance-ui-tests` PipelineRun
 
+UI credentials use `API_URL` (required; mapped to infra `APISERVER`), `CONSOLE_URL` (required), `CONSOLE_USERNAME`, and `CONSOLE_PASSWORD` (mapped to kubeadmin fields for cluster secrets / `oc login`). OSP (and optional logging/serverless) install runs in the **infra workflow** (`setup-pipelines-ci` / `run-ui-workflow`). The PipelineRun always passes `INSTALL_PIPELINES_OPERATOR=false` to `release-ui-tests` for now; `INSTALL_LOGGING_OPERATOR` / `INSTALL_SERVERLESS_OPERATOR` are still forwarded. Framework product-install is deferred.
+
 Or PipelineRun only (after setup):
 
 ```bash

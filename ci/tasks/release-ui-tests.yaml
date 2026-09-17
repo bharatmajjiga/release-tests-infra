@@ -13,6 +13,39 @@ spec:
   - name: IMAGE
     description: Container image for running UI tests (Playwright + pytest)
     default: quay.io/openshift-pipeline/ui-ci:latest
+  - name: API_URL
+    description: OpenShift API URL (required by the UI framework)
+    default: ""
+  - name: CONSOLE_URL
+    description: OpenShift console URL (required by the UI framework)
+    default: ""
+  - name: CONSOLE_USERNAME
+    description: Console login username passed to the UI framework
+    default: kubeadmin
+  - name: OPERATOR_VERSION
+    description: OSP version passed to the UI framework for install
+    default: ""
+  - name: OPERATOR_ENVIRONMENT
+    description: prod / stage / pre-stage — passed to the UI framework
+    default: pre-stage
+  - name: CHANNEL
+    description: OLM channel passed to the UI framework
+    default: ""
+  - name: KONFLUX_INDEX_IMAGE
+    description: Konflux index image URL passed to the UI framework
+    default: ""
+  - name: INSTALL_PIPELINES_OPERATOR
+    description: Whether the UI framework should install OSP (framework default false)
+    default: "false"
+  - name: OSP_INSTALL_METHOD
+    description: How the UI framework installs OSP (framework default ui)
+    default: "ui"
+  - name: INSTALL_LOGGING_OPERATOR
+    description: Passed to the UI framework (noop until framework implements it)
+    default: "false"
+  - name: INSTALL_SERVERLESS_OPERATOR
+    description: Passed to the UI framework (noop until framework implements it)
+    default: "false"
   - name: MARKERS
     description: pytest marker expression (e.g. sanity, smoke)
     default: sanity
@@ -22,6 +55,9 @@ spec:
   - name: APP_TIMEOUT
     description: Application timeout for element waits (ms)
     default: "90000"
+  - name: AUTH_TYPE
+    description: Console authentication mode passed to pytest (e.g. kube:admin)
+    default: "kube:admin"
   - name: CAPTURE_SCREENSHOTS
     description: Capture Playwright screenshots on failure
     default: "true"
@@ -59,6 +95,7 @@ spec:
             secretKeyRef:
               key: api-url
               name: cluster-$(params.CLUSTER_NAME)
+              optional: true
         - name: TASKRUN_NAME
           value: $(context.taskRun.name)
         - name: TASKRUN_NAMESPACE
@@ -118,32 +155,65 @@ spec:
         [[ -n "$resolved" ]] && taskRunName="$resolved"
         echo "Resolved pipelineTask name: ${taskRunName}"
 
-        [[ -n "${APISERVER:-}" ]] || { echo "ERROR: APISERVER missing from cluster-$(params.CLUSTER_NAME) secret"; exit 1; }
+        export API_URL="$(params.API_URL)"
+        API_URL="${API_URL:-${APISERVER:-}}"
+        export API_URL
+        [[ -n "${API_URL}" ]] || {
+          echo "ERROR: API_URL is required (set in env / PipelineRun param, or api-url in cluster secret)"
+          exit 1
+        }
 
+        ADMIN_NAME=${ADMIN_NAME:-$(params.CONSOLE_USERNAME)}
         ADMIN_NAME=${ADMIN_NAME:-kubeadmin}
         if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
           echo "Logging in to cluster $(params.CLUSTER_NAME) as '${ADMIN_NAME}'"
-          oc login -u "$ADMIN_NAME" -p "$ADMIN_PASSWORD" "$APISERVER" --insecure-skip-tls-verify=true
+          oc login -u "$ADMIN_NAME" -p "$ADMIN_PASSWORD" "$API_URL" --insecure-skip-tls-verify=true
         elif [[ -n "${ADMIN_TOKEN:-}" ]]; then
           echo "Logging in to cluster $(params.CLUSTER_NAME) with token"
-          oc login --token="$ADMIN_TOKEN" "$APISERVER" --insecure-skip-tls-verify=true
+          oc login --token="$ADMIN_TOKEN" "$API_URL" --insecure-skip-tls-verify=true
         else
           echo "ERROR: no credentials — set kubeadmin-password or admin-token in cluster secret"
           exit 1
         fi
 
-        export CONSOLE_URL
-        CONSOLE_URL="$(oc whoami --show-console)"
-        export CONSOLE_USERNAME="${ADMIN_NAME}"
+        export CONSOLE_URL="$(params.CONSOLE_URL)"
+        if [[ -z "${CONSOLE_URL}" ]]; then
+          CONSOLE_URL="$(oc whoami --show-console 2>/dev/null || true)"
+        fi
+        [[ -n "${CONSOLE_URL}" ]] || {
+          echo "ERROR: CONSOLE_URL is required (set in env / PipelineRun param)"
+          exit 1
+        }
+        export CONSOLE_USERNAME="$(params.CONSOLE_USERNAME)"
+        CONSOLE_USERNAME="${CONSOLE_USERNAME:-${ADMIN_NAME}}"
+        export CONSOLE_USERNAME
         export CONSOLE_PASSWORD="${ADMIN_PASSWORD:-}"
         export APP_TIMEOUT="$(params.APP_TIMEOUT)"
+        export AUTH_TYPE="$(params.AUTH_TYPE)"
         export CAPTURE_SCREENSHOTS="$(params.CAPTURE_SCREENSHOTS)"
         export CAPTURE_RECORDINGS="$(params.CAPTURE_RECORDINGS)"
         export ARTIFACTS_DIR
 
+        # Infra installs OSP today; PipelineRun should pass INSTALL_PIPELINES_OPERATOR=false.
+        # Logging/serverless flags are forwarded for framework use when implemented.
+        export OPERATOR_VERSION="$(params.OPERATOR_VERSION)"
+        export OPERATOR_ENVIRONMENT="$(params.OPERATOR_ENVIRONMENT)"
+        export CHANNEL="$(params.CHANNEL)"
+        export KONFLUX_INDEX_IMAGE="$(params.KONFLUX_INDEX_IMAGE)"
+        export INSTALL_PIPELINES_OPERATOR="$(params.INSTALL_PIPELINES_OPERATOR)"
+        export OSP_INSTALL_METHOD="$(params.OSP_INSTALL_METHOD)"
+        export INSTALL_LOGGING_OPERATOR="$(params.INSTALL_LOGGING_OPERATOR)"
+        export INSTALL_SERVERLESS_OPERATOR="$(params.INSTALL_SERVERLESS_OPERATOR)"
+
+        echo "API_URL=${API_URL}"
         echo "CONSOLE_URL=${CONSOLE_URL}"
         echo "CONSOLE_USERNAME=${CONSOLE_USERNAME}"
         echo "ARTIFACTS_DIR=${ARTIFACTS_DIR}"
+        echo "AUTH_TYPE=${AUTH_TYPE}"
+        echo "OPERATOR_VERSION=${OPERATOR_VERSION}  ENVIRONMENT=${OPERATOR_ENVIRONMENT}  CHANNEL=${CHANNEL}"
+        echo "INSTALL_PIPELINES_OPERATOR=${INSTALL_PIPELINES_OPERATOR}  OSP_INSTALL_METHOD=${OSP_INSTALL_METHOD}"
+        echo "INSTALL_LOGGING_OPERATOR=${INSTALL_LOGGING_OPERATOR}"
+        echo "INSTALL_SERVERLESS_OPERATOR=${INSTALL_SERVERLESS_OPERATOR}"
         echo "Markers: $(params.MARKERS)"
 
         [[ -d tests ]] || { echo "ERROR: release-ui-tests repo not ready (missing tests/)"; ls -la; exit 1; }
@@ -154,6 +224,16 @@ spec:
           echo "Started: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "pipelineTask: ${taskRunName}"
           echo "markers: $(params.MARKERS)"
+          echo "auth_type: ${AUTH_TYPE}"
+          echo "OPERATOR_VERSION: ${OPERATOR_VERSION}"
+          echo "OPERATOR_ENVIRONMENT: ${OPERATOR_ENVIRONMENT}"
+          echo "CHANNEL: ${CHANNEL}"
+          echo "KONFLUX_INDEX_IMAGE: ${KONFLUX_INDEX_IMAGE}"
+          echo "INSTALL_PIPELINES_OPERATOR: ${INSTALL_PIPELINES_OPERATOR}"
+          echo "OSP_INSTALL_METHOD: ${OSP_INSTALL_METHOD}"
+          echo "INSTALL_LOGGING_OPERATOR: ${INSTALL_LOGGING_OPERATOR}"
+          echo "INSTALL_SERVERLESS_OPERATOR: ${INSTALL_SERVERLESS_OPERATOR}"
+          echo "API_URL: ${API_URL}"
           echo "CONSOLE_URL: ${CONSOLE_URL}"
           echo "Command: pytest -m $(params.MARKERS) $(params.PYTEST_ARGS)"
           echo "---"
