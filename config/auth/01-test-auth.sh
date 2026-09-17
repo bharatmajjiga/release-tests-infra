@@ -73,6 +73,19 @@ for ns in openshift-pipelines; do
 done
 echo "Non-admin edit bindings created in openshift-pipelines"
 
+# Bind test approvers cluster-wide so user1–user5 can
+# patch ApprovalTasks in those dynamically created namespaces.
+if oc get clusterrole manual-approval-gate-approver &>/dev/null; then
+  for u in user1 user2 user3 user4 user5; do
+    oc get clusterrolebinding "${u}-mag-approver" &>/dev/null 2>&1 \
+      || oc create clusterrolebinding "${u}-mag-approver" \
+        --clusterrole=manual-approval-gate-approver --user="$u"
+  done
+  echo "Manual approval gate approver bindings created for user1-user5"
+else
+  echo "ClusterRole manual-approval-gate-approver not found — skipping MAG approver bindings"
+fi
+
 # --- Step 4: Wait for OAuth rollout ---
 echo "Waiting for authentication operator to apply changes..."
 oc wait co/authentication --for=condition=Progressing=True --timeout=60s 2>/dev/null || true
