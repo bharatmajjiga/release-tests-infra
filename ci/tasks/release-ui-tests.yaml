@@ -22,6 +22,9 @@ spec:
   - name: APP_TIMEOUT
     description: Application timeout for element waits (ms)
     default: "90000"
+  - name: AUTH_TYPE
+    description: Console authentication mode passed to pytest (e.g. kube:admin)
+    default: "kube:admin"
   - name: CAPTURE_SCREENSHOTS
     description: Capture Playwright screenshots on failure
     default: "true"
@@ -137,6 +140,7 @@ spec:
         export CONSOLE_USERNAME="${ADMIN_NAME}"
         export CONSOLE_PASSWORD="${ADMIN_PASSWORD:-}"
         export APP_TIMEOUT="$(params.APP_TIMEOUT)"
+        export AUTH_TYPE="$(params.AUTH_TYPE)"
         export CAPTURE_SCREENSHOTS="$(params.CAPTURE_SCREENSHOTS)"
         export CAPTURE_RECORDINGS="$(params.CAPTURE_RECORDINGS)"
         export ARTIFACTS_DIR
@@ -144,6 +148,7 @@ spec:
         echo "CONSOLE_URL=${CONSOLE_URL}"
         echo "CONSOLE_USERNAME=${CONSOLE_USERNAME}"
         echo "ARTIFACTS_DIR=${ARTIFACTS_DIR}"
+        echo "AUTH_TYPE=${AUTH_TYPE}"
         echo "Markers: $(params.MARKERS)"
 
         [[ -d tests ]] || { echo "ERROR: release-ui-tests repo not ready (missing tests/)"; ls -la; exit 1; }
@@ -154,6 +159,7 @@ spec:
           echo "Started: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "pipelineTask: ${taskRunName}"
           echo "markers: $(params.MARKERS)"
+          echo "auth_type: ${AUTH_TYPE}"
           echo "CONSOLE_URL: ${CONSOLE_URL}"
           echo "Command: pytest -m $(params.MARKERS) $(params.PYTEST_ARGS)"
           echo "---"

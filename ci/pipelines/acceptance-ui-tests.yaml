@@ -86,6 +86,9 @@ spec:
   - name: APP_TIMEOUT
     description: Application timeout for Playwright element waits (ms)
     default: "90000"
+  - name: AUTH_TYPE
+    description: Console authentication mode for UI tests (e.g. kube:admin)
+    default: "kube:admin"
   - name: CAPTURE_SCREENSHOTS
     description: Capture Playwright screenshots on test failure
     default: "true"
@@ -464,6 +467,8 @@ spec:
         value: $(params.PYTEST_ARGS)
       - name: APP_TIMEOUT
         value: $(params.APP_TIMEOUT)
+      - name: AUTH_TYPE
+        value: $(params.AUTH_TYPE)
       - name: CAPTURE_SCREENSHOTS
         value: $(params.CAPTURE_SCREENSHOTS)
       - name: CAPTURE_RECORDINGS
