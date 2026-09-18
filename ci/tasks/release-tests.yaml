@@ -612,19 +612,41 @@ spec:
 
         # Upgrade approval: OLM drives the version via the channel graph (startingCSV is
         # ignored on an existing subscription), so approve whatever InstallPlan the target
-        # channel produces and wait until the installedCSV lands on the target minor
-        # (any z-stream / build suffix), rather than a fixed CSV name.
+        # channel produces and wait until installedCSV matches the request.
+        #
+        # - Full x.y.z (e.g. 1.22.6): wait for that exact CSV (or build suffix). Required for
+        #   same-minor z-stream upgrades — waiting only for the minor would succeed immediately
+        #   when already on e.g. 1.22.5 while targeting 1.22.6.
+        # - Major.minor only (e.g. 1.23): wait for any z-stream on that minor (cross-minor
+        #   channel-head upgrades).
+        csv_matches_upgrade_target() {
+          local installed="$1" ver="$2"
+          local target_minor="${ver%.*}"
+          if [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            [[ "$installed" == "openshift-pipelines-operator-rh.v${ver}" || \
+               "$installed" == "openshift-pipelines-operator-rh.v${ver}."* || \
+               "$installed" == "openshift-pipelines-operator-rh.v${ver}-"* ]]
+          else
+            [[ "$installed" == "openshift-pipelines-operator-rh.v${target_minor}."* ]]
+          fi
+        }
+
         approve_upgrade_installplan() {
           local ver="$1"
-          local target="${ver%.*}"
-          local prefix="openshift-pipelines-operator-rh.v${target}."
+          local target_minor="${ver%.*}"
+          local want_desc
+          if [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            want_desc="v${ver} (exact z-stream)"
+          else
+            want_desc="v${target_minor}.x (any z-stream)"
+          fi
           local deadline=$((SECONDS + 1800))
           local ip names approved installed phase
-          echo "Waiting for operator to upgrade to ${target}.x (approving Manual InstallPlans)..."
+          echo "Waiting for operator to upgrade to ${want_desc} (approving Manual InstallPlans)..."
           while (( SECONDS < deadline )); do
             installed=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators \
               -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)
-            if [[ "$installed" == "${prefix}"* ]]; then
+            if csv_matches_upgrade_target "$installed" "$ver"; then
               phase=$(oc get csv "$installed" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || true)
               if [[ "$phase" == Succeeded ]]; then
                 echo "Upgraded to ${installed} (phase=Succeeded)"
@@ -642,10 +664,10 @@ spec:
                 oc patch installplan "$ip" -n openshift-operators --type merge -p '{"spec":{"approved":true}}' || true
               fi
             done < <(oc get installplan -n openshift-operators --no-headers 2>/dev/null | awk '{print $1}')
-            echo "  operator installedCSV=${installed:-none} (want ${target}.x)..."
+            echo "  operator installedCSV=${installed:-none} (want ${want_desc})..."
             sleep 10
           done
-          echo "ERROR: operator did not upgrade to ${target}.x"
+          echo "ERROR: operator did not upgrade to ${want_desc}"
           oc get subscription,csv,installplan -n openshift-operators || true
           return 1
         }
