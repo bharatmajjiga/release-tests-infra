@@ -5,8 +5,22 @@ echo "Installing OpenShift Pipelines operator"
 CHANNEL=${CHANNEL:-stable}
 CATALOG_SOURCE=${CATALOG_SOURCE:-redhat-operators}
 OPERATOR_VERSION="${OPERATOR_VERSION:-${OSP_VERSION:-}}"
+
+is_nightly() {
+  case "$(printf '%s' "${NIGHTLY:-false}" | tr '[:upper:]' '[:lower:]')" in
+    true|yes|1|on) return 0 ;;
+  esac
+  [[ "${KONFLUX_INDEX_IMAGE:-}" == *:nightly ]]
+}
+
+NIGHTLY_INSTALL=false
+if is_nightly; then
+  NIGHTLY_INSTALL=true
+  echo "Nightly install: channel-head on ${CATALOG_SOURCE}/${CHANNEL} (no startingCSV pin)"
+fi
+
 CSV_NAME=""
-if [[ -n "$OPERATOR_VERSION" ]]; then
+if [[ -n "$OPERATOR_VERSION" && "$NIGHTLY_INSTALL" != true ]]; then
   CSV_NAME="openshift-pipelines-operator-rh.v${OPERATOR_VERSION}"
 fi
 
@@ -29,8 +43,46 @@ wait_csv_succeeded() {
 
 csv_matches_requested() {
   local installed=$1
-  [[ -z "$OPERATOR_VERSION" ]] && return 0
+  [[ -z "$OPERATOR_VERSION" || "$NIGHTLY_INSTALL" == true ]] && return 0
   [[ "$installed" == "$CSV_NAME" || "$installed" == *".v${OPERATOR_VERSION}" ]]
+}
+
+# Approve Manual InstallPlans until the subscription's installedCSV reaches Succeeded
+# (channel head — used for nightly where the CSV is 5.0.5-<random>).
+# Sets APPROVED_CSV on success.
+approve_latest_installplan() {
+  local deadline=$((SECONDS + 900))
+  local ip names phase approved installed
+  APPROVED_CSV=""
+  echo "Waiting for latest CSV on ${CHANNEL} (approving Manual InstallPlans)..."
+  while (( SECONDS < deadline )); do
+    installed=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators \
+      -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)
+    if [[ -n "$installed" ]]; then
+      phase=$(oc get csv "$installed" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || true)
+      if [[ "$phase" == Succeeded ]]; then
+        echo "Installed ${installed} (phase=Succeeded)"
+        APPROVED_CSV="$installed"
+        return 0
+      fi
+    fi
+    while IFS= read -r ip; do
+      [[ -n "$ip" ]] || continue
+      names=$(oc get installplan "$ip" -n openshift-operators \
+        -o jsonpath='{.spec.clusterServiceVersionNames[*]}' 2>/dev/null || true)
+      approved=$(oc get installplan "$ip" -n openshift-operators \
+        -o jsonpath='{.spec.approved}' 2>/dev/null || true)
+      if [[ "$names" == *openshift-pipelines-operator-rh* && "$approved" != true ]]; then
+        echo "Approving InstallPlan ${ip} (${names})"
+        oc patch installplan "$ip" -n openshift-operators --type merge -p '{"spec":{"approved":true}}' || true
+      fi
+    done < <(oc get installplan -n openshift-operators --no-headers 2>/dev/null | awk '{print $1}')
+    echo "  operator CSV installed=${installed:-none} phase=${phase:-none}..."
+    sleep 10
+  done
+  echo "ERROR: operator did not reach Succeeded on channel ${CHANNEL}" >&2
+  oc get subscription,csv,installplan -n openshift-operators || true
+  return 1
 }
 
 # Skip only when the installed CSV is the requested version (not merely "latest on channel").
@@ -42,11 +94,15 @@ existing_state=$(oc get subscription openshift-pipelines-operator-rh -n openshif
 # Skip when the requested CSV is already Succeeded. Do not require AtLatestKnown:
 # Manual + startingCSV leaves UpgradePending when a newer z-stream exists on the
 # channel (expected for upgrade tests). Wiping would break acceptance re-runs.
-if [[ -n "$existing_csv" ]] && csv_matches_requested "$existing_csv"; then
+# Nightly: skip only when some CSV on the channel is already Succeeded.
+if [[ -n "$existing_csv" ]]; then
   phase=$(oc get "csv/${existing_csv}" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || true)
   if [[ "$phase" == Succeeded ]]; then
-    echo "Operator ${existing_csv} already installed (${existing_state:-unknown}, ${CATALOG_SOURCE}/${CHANNEL})"
-    exit 0
+    if [[ "$NIGHTLY_INSTALL" == true ]] || csv_matches_requested "$existing_csv"; then
+      echo "Operator ${existing_csv} already installed (${existing_state:-unknown}, ${CATALOG_SOURCE}/${CHANNEL})"
+      echo "INSTALLED_OSP_VERSION=${existing_csv#openshift-pipelines-operator-rh.v}"
+      exit 0
+    fi
   fi
 fi
 
@@ -65,6 +121,8 @@ STARTING_CSV_LINE=""
 if [[ -n "$CSV_NAME" ]]; then
   STARTING_CSV_LINE="  startingCSV: ${CSV_NAME}"
   echo "Pinning startingCSV=${CSV_NAME} on ${CATALOG_SOURCE}/${CHANNEL}"
+elif [[ "$NIGHTLY_INSTALL" == true ]]; then
+  echo "Omitting startingCSV (nightly channel-head install on ${CATALOG_SOURCE}/${CHANNEL})"
 fi
 
 cat <<EOF | oc apply -f -
@@ -82,6 +140,14 @@ spec:
 ${STARTING_CSV_LINE}
 EOF
 
+if [[ "$NIGHTLY_INSTALL" == true ]]; then
+  approve_latest_installplan || exit 1
+  csv="$APPROVED_CSV"
+  echo "Operator ${csv} installed"
+  echo "INSTALLED_OSP_VERSION=${csv#openshift-pipelines-operator-rh.v}"
+  exit 0
+fi
+
 echo "Waiting for InstallPlan..."
 deadline=$((SECONDS + 300))
 installplan=""
@@ -98,6 +164,7 @@ while (( SECONDS < deadline )); do
       phase=$(oc get "csv/${csv}" -n openshift-operators -o jsonpath='{.status.phase}' 2>/dev/null || true)
       if [[ "$phase" == Succeeded ]]; then
         echo "Operator ${csv} already installed"
+        echo "INSTALLED_OSP_VERSION=${csv#openshift-pipelines-operator-rh.v}"
         exit 0
       fi
     fi
@@ -135,3 +202,4 @@ echo "  subscription CSV=${csv}"
 
 wait_csv_succeeded "$csv" openshift-operators 10m
 echo "Operator ${csv} installed"
+echo "INSTALLED_OSP_VERSION=${csv#openshift-pipelines-operator-rh.v}"

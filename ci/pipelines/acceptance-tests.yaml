@@ -61,8 +61,11 @@ spec:
     description: p12n operator environment (prod, stage, pre-stage)
     default: pre-stage
   - name: OPERATOR_VERSION
-    description: version of Openshift Pipelines operator (x.y.z)
+    description: version of Openshift Pipelines operator (x.y.z, or major.minor for nightly channel-head)
     default: ""
+  - name: NIGHTLY
+    description: "true when KONFLUX_INDEX_IMAGE ends with :nightly — IDMS + unpinned channel-head install"
+    default: "false"
   - name: TAGS
     description: gauge tags for test suites
     default: "e2e"
@@ -337,6 +340,8 @@ spec:
         value: $(params.CATALOG_SOURCE)
       - name: CHANNEL
         value: $(params.CHANNEL)
+      - name: CHANNEL_VERSION
+        value: $(params.OPERATOR_VERSION)
       - name: CLUSTER_NAME
         value: $(tasks.provision-cluster.results.cluster-name)
       - name: FAIL_ON_ERROR
@@ -345,6 +350,8 @@ spec:
         value: $(params.IMAGE)
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
+      - name: NIGHTLY
+        value: $(params.NIGHTLY)
       - name: OSP_VERSION
         value: $(params.OPERATOR_VERSION)
       - name: GIT_RELEASE_TESTS_BRANCH
@@ -389,9 +396,23 @@ spec:
       workspace: data
       subPath: results
 
+  # Resolve real CSV version (nightly 5.0.5-<random>) for all downstream suites.
+  # Always runs — reads cluster when install was skipped or after channel-head install.
+  - name: resolve-osp-version
+    params:
+      - name: CLUSTER_NAME
+        value: $(tasks.provision-cluster.results.cluster-name)
+      - name: FALLBACK_VERSION
+        value: $(params.OPERATOR_VERSION)
+    runAfter:
+      - install-pipelines-operator
+    taskRef:
+      name: resolve-osp-version
+    timeout: 5m
+
   # ============================================================
   # Test suites — each gated by TEST_SUITES array param
-  # All run after install-pipelines-operator
+  # All run after resolve-osp-version (installed CSV version)
   # ============================================================
   - name: release-tests-versions
     onError: continue
@@ -407,7 +428,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -425,7 +446,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 30m
@@ -456,7 +477,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -474,7 +495,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 30m
@@ -505,7 +526,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -523,7 +544,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 30m
@@ -554,7 +575,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -572,7 +593,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 1h
@@ -603,7 +624,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -621,7 +642,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 30m
@@ -652,7 +673,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -670,7 +691,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 30m
@@ -702,7 +723,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -720,7 +741,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 30m
@@ -752,7 +773,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -770,7 +791,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 30m
@@ -802,7 +823,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -820,7 +841,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 30m
@@ -851,7 +872,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -869,7 +890,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 30m
@@ -900,7 +921,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -918,7 +939,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 1h
@@ -949,7 +970,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -967,7 +988,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 1h
@@ -1002,7 +1023,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -1062,7 +1083,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -1107,7 +1128,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -1125,7 +1146,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 30m
@@ -1156,7 +1177,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -1174,7 +1195,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 1h
@@ -1205,7 +1226,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -1223,7 +1244,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 1h
@@ -1256,7 +1277,7 @@ spec:
       - name: TKN_DOWNLOAD_URL
         value: $(params.TKN_DOWNLOAD_URL)
       - name: OSP_VERSION
-        value: $(params.OPERATOR_VERSION)
+        value: $(tasks.resolve-osp-version.results.osp-version)
       - name: GIT_RELEASE_TESTS_BRANCH
         value: $(params.GIT_RELEASE_TESTS_BRANCH)
       - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -1274,7 +1295,7 @@ spec:
       - clone-release-tests-ginkgo-git
       - go-mod-cache-gauge
       - go-mod-cache-ginkgo
-      - install-pipelines-operator
+      - resolve-osp-version
     taskRef:
       name: release-tests
     timeout: 1h
@@ -1304,7 +1325,7 @@ spec:
       - name: IMAGE
         value: $(params.POST_TEST_IMAGE)
     runAfter:
-      - install-pipelines-operator
+      - resolve-osp-version
       - release-tests-versions
       - release-tests-pipelines
       - release-tests-triggers
@@ -1348,7 +1369,7 @@ spec:
     - name: TKN_DOWNLOAD_URL
       value: $(params.TKN_DOWNLOAD_URL)
     - name: OSP_VERSION
-      value: $(params.OPERATOR_VERSION)
+      value: $(tasks.resolve-osp-version.results.osp-version)
     - name: GIT_RELEASE_TESTS_BRANCH
       value: $(params.GIT_RELEASE_TESTS_BRANCH)
     - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
@@ -1415,7 +1436,7 @@ spec:
         - name: PIPELINE_RUN_NAME
           value: $(context.pipelineRun.name)
         - name: OPERATOR_VERSION
-          value: $(params.OPERATOR_VERSION)
+          value: $(tasks.resolve-osp-version.results.osp-version)
         - name: IMAGE
           value: $(params.IMAGE)
       taskRef:

@@ -56,3 +56,28 @@ spec:
 
           echo "CatalogSource YAML generated at ${OUT}"
           cat "$OUT"
+
+          # Nightly indexes publish bundles/operands under prod registry names that
+          # actually live on quay.io — emit IDMS so pulls succeed before CatalogSource.
+          IDMS_OUT="$(workspaces.build-artifacts.path)/idms.yaml"
+          if [[ "$INDEX_IMAGE" == *:nightly ]]; then
+            echo "Generating ImageDigestMirrorSet for nightly index"
+            printf '%s\n' \
+              "apiVersion: config.openshift.io/v1" \
+              "kind: ImageDigestMirrorSet" \
+              "metadata:" \
+              "  name: pipelines-mirror" \
+              "spec:" \
+              "  imageDigestMirrors:" \
+              "  - source: registry.stage.redhat.io/openshift-pipelines" \
+              "    mirrors:" \
+              "    - quay.io/openshift-pipeline" \
+              "  - source: registry.redhat.io/openshift-pipelines" \
+              "    mirrors:" \
+              "    - quay.io/openshift-pipeline" \
+              > "$IDMS_OUT"
+            echo "IDMS YAML generated at ${IDMS_OUT}"
+            cat "$IDMS_OUT"
+          else
+            rm -f "$IDMS_OUT"
+          fi
