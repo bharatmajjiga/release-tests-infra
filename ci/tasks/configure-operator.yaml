@@ -64,8 +64,17 @@ spec:
             echo "ERROR: no credentials in cluster secret"; exit 1
           fi
 
+          ARTIFACTS="$(workspaces.build-artifacts.path)"
+          IDMS="${ARTIFACTS}/idms.yaml"
+          if [[ -f "$IDMS" ]]; then
+            echo "Applying ImageDigestMirrorSet (nightly registry mirrors)"
+            oc apply -f "$IDMS"
+            oc get imagedigestmirrorset pipelines-mirror -o name
+            sleep 5
+          fi
+
           echo -e "Creating custom catalog source"
-          oc apply -f $(workspaces.build-artifacts.path)/catalog-source.yaml
+          oc apply -f "${ARTIFACTS}/catalog-source.yaml"
           sleep 30
 
           echo "Waiting for pods in namespace openshift-marketplace to be ready"

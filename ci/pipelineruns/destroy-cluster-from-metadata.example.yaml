@@ -1,0 +1,47 @@
+# Example: destroy an orphaned AWS IPI cluster from metadata.json
+#
+# 1. Edit metadata.json below with your cluster details
+# 2. oc apply -f ci/pipelineruns/destroy-cluster-from-metadata.example.yaml -n pipelines-ci
+# 3. oc logs -f -n pipelines-ci -l tekton.dev/pipelineRun=<run-name> --all-containers
+#
+# Or use the helper script:
+#   ./scripts/hack/create-pipelinerun-destroy-metadata.sh /path/to/metadata.json
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: destroy-metadata-upgrd081114
+  namespace: pipelines-ci
+data:
+  metadata.json: |
+    {
+      "clusterName": "upgrd081114",
+      "clusterID": "your-cluster-uuid-or-infra-id",
+      "infraID": "upgrd081114-xxxxx",
+      "aws": {
+        "region": "us-east-2"
+      }
+    }
+---
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: destroy-cluster-metadata-
+  namespace: pipelines-ci
+spec:
+  pipelineRef:
+    name: destroy-cluster-from-metadata
+  params:
+    - name: LOG_LEVEL
+      value: debug
+    - name: ARCH
+      value: linux/amd64
+    # Optional: delete CI secret after successful destroy (name without namespace)
+    - name: CLUSTER_SECRET_NAME
+      value: cluster-upgrd081114
+  workspaces:
+    - name: install-dir
+      configMap:
+        name: destroy-metadata-upgrd081114
+  timeouts:
+    pipeline: 45m

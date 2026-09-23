@@ -33,14 +33,35 @@ All values live in `env/env.template`, copied to `env/.env.acceptance` or `env/.
 | Variable | Description |
 |----------|-------------|
 | `INSTALLER` | `cluster-platforms, cp`, `aws-ipi`, `aro`, `none` |
-| `OPERATOR_VERSION` | Pipelines operator version (e.g. `1.23.1`) |
+| `OPERATOR_VERSION` | Pipelines operator version (e.g. `1.23.1`, or `5.0` for nightly) |
 | `OPERATOR_ENVIRONMENT` | `prod`, `stage`, `pre-stage` |
 | `CATALOG_SOURCE` | `redhat-operators` (prod) or `custom-operators` |
-| `KONFLUX_INDEX_IMAGE` | Required for stage/pre-stage |
+| `KONFLUX_INDEX_IMAGE` | Required for stage/pre-stage; use `…:nightly` for nightly builds |
 | `TEST_FRAMEWORK` | `gauge` or `ginkgo` |
 | `TAGS` | Label filter (e.g. `e2e`, `sanity`) |
 | `TEST_SUITES` | Comma-separated list of suites to run |
 | `CRED_SOURCE` | `local` (from `ENV_FILE`) or `vault` (from Vault) |
+
+## Nightly builds
+
+Nightly Konflux indexes (tag `:nightly`) are detected automatically. No manual IDMS or CSV pinning is required.
+
+```bash
+OPERATOR_VERSION=5.0
+OPERATOR_ENVIRONMENT=pre-stage
+CATALOG_SOURCE=custom-operators
+# Match index OCP minor to the cluster (4.18 cluster → pipelines-index-4.18:nightly)
+KONFLUX_INDEX_IMAGE=quay.io/openshift-pipeline/pipelines-index-4.18:nightly
+INSTALL_PIPELINES_OPERATOR=true
+```
+
+When the index tag is `:nightly`, the framework:
+
+1. Applies `ImageDigestMirrorSet/pipelines-mirror` (prod/stage registry → `quay.io/openshift-pipeline`)
+2. Installs channel-head on `pipelines-5.0` without pinning `startingCSV`
+3. Resolves the real CSV (e.g. `5.0.5-<build>`) and passes it to all test suites
+
+Available nightly indexes follow `quay.io/openshift-pipeline/pipelines-index-<ocp>:nightly` (4.14, 4.16, 4.18–4.23, 5.0).
 
 ## Running acceptance tests
 

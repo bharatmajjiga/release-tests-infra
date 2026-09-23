@@ -1,0 +1,71 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: resolve-osp-version
+  description: >
+    Resolve the installed OpenShift Pipelines operator version from the cluster
+    CSV (e.g. nightly 5.0.5-<random>). Falls back to FALLBACK_VERSION when no
+    operator is installed yet.
+spec:
+  params:
+    - name: CLUSTER_NAME
+      description: Cluster secret name suffix (cluster-$(CLUSTER_NAME))
+    - name: FALLBACK_VERSION
+      description: Used when no pipelines CSV is installed (e.g. OPERATOR_VERSION=5.0)
+  results:
+    - name: osp-version
+      description: Installed CSV version without the openshift-pipelines-operator-rh.v prefix
+  steps:
+    - name: resolve
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      env:
+        - name: ADMIN_NAME
+          valueFrom:
+            secretKeyRef:
+              key: admin-name
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: kubeadmin-password
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: admin-token
+              name: cluster-$(params.CLUSTER_NAME)
+              optional: true
+        - name: APISERVER
+          valueFrom:
+            secretKeyRef:
+              key: api-url
+              name: cluster-$(params.CLUSTER_NAME)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        FALLBACK="$(params.FALLBACK_VERSION)"
+        ADMIN_NAME=${ADMIN_NAME:-kubeadmin}
+        if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
+          oc login -u "$ADMIN_NAME" -p "$ADMIN_PASSWORD" "$APISERVER" --insecure-skip-tls-verify=true >/dev/null
+        elif [[ -n "${ADMIN_TOKEN:-}" ]]; then
+          oc login --token="$ADMIN_TOKEN" "$APISERVER" --insecure-skip-tls-verify=true >/dev/null
+        else
+          echo "ERROR: no credentials in cluster secret"; exit 1
+        fi
+
+        csv=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators \
+          -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)
+        [[ -z "$csv" ]] && csv=$(oc get subscription openshift-pipelines-operator-rh -n openshift-operators \
+          -o jsonpath='{.status.currentCSV}' 2>/dev/null || true)
+
+        if [[ -n "$csv" ]]; then
+          ver="${csv#openshift-pipelines-operator-rh.v}"
+          echo "Resolved installed OSP version: ${ver} (from ${csv})"
+        else
+          ver="$FALLBACK"
+          echo "No pipelines CSV found; using FALLBACK_VERSION=${ver}"
+        fi
+        printf '%s' "$ver" > "$(results.osp-version.path)"

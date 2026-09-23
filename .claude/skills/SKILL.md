@@ -266,6 +266,7 @@ Then restart the IDE. The script auto-detects the active cluster and writes `.cl
 |-------|-----|
 | `exec format error` on gauge-go | Wrong arch binary; delete gomod-cache PVC, retrigger |
 | `ImagePullBackOff` on `registry.stage.redhat.io` | Run `create-secrets.sh` with Vault |
+| `ImagePullBackOff` on `registry.redhat.io/openshift-pipelines` (nightly) | Ensure index is `:nightly` so IDMS `pipelines-mirror` is applied |
 | `VpcLimitExceeded` | Run `cleanup-orphan-clusters.sh` |
 | `InstalledStatus: False` | Restart stuck pods in openshift-pipelines |
 | `kube:admin` auth error | Patch cluster secret: admin-name should be `kubeadmin` |

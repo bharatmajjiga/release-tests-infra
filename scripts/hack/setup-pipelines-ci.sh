@@ -60,11 +60,61 @@ ensure_cluster_secret() {
   echo "Cluster secret ${secret} ready"
 }
 
+is_nightly_index() {
+  [[ "${KONFLUX_INDEX_IMAGE:-}" == *:nightly ]]
+}
+
+resolve_nightly() {
+  if [[ -z "${NIGHTLY:-}" ]]; then
+    if is_nightly_index; then
+      NIGHTLY=true
+    else
+      NIGHTLY=false
+    fi
+  fi
+  NIGHTLY="$(printf '%s' "$NIGHTLY" | tr '[:upper:]' '[:lower:]')"
+  case "$NIGHTLY" in true|yes|1|on) NIGHTLY=true ;; *) NIGHTLY=false ;; esac
+  export NIGHTLY
+  # Guard against set -e: a trailing "[[ ... ]] && echo" leaves exit status 1 when false.
+  [[ "$NIGHTLY" == true ]] && echo "NIGHTLY=true (Konflux index tag :nightly)"
+  return 0
+}
+
+apply_pipelines_idms() {
+  echo "Applying ImageDigestMirrorSet pipelines-mirror (nightly registry mirrors)"
+  oc apply -f - <<EOF
+apiVersion: config.openshift.io/v1
+kind: ImageDigestMirrorSet
+metadata:
+  name: pipelines-mirror
+spec:
+  imageDigestMirrors:
+  - source: registry.stage.redhat.io/openshift-pipelines
+    mirrors:
+    - quay.io/openshift-pipeline
+  - source: registry.redhat.io/openshift-pipelines
+    mirrors:
+    - quay.io/openshift-pipeline
+EOF
+  oc get imagedigestmirrorset pipelines-mirror -o name
+  sleep 5
+}
+
 resolve_channel() {
   local ver="${OPERATOR_VERSION:-${UPGRADE_VERSION:-${PRE_UPGRADE_VERSION:-}}}"
   [[ -n "$ver" ]] || die "OPERATOR_VERSION (or UPGRADE_VERSION / PRE_UPGRADE_VERSION) required"
   if [[ -z "${CHANNEL:-}" || "${CHANNEL}" == latest ]]; then
-    CHANNEL="pipelines-${ver%.*}"
+    # Prefer major.minor channel (e.g. 5.0 → pipelines-5.0). ${ver%.*} alone turns
+    # 5.0 into pipelines-5, which is wrong for the 5.0 line.
+    if [[ "$ver" =~ ^[0-9]+\.[0-9]+ ]]; then
+      local major minor
+      major="${ver%%.*}"
+      minor="${ver#*.}"
+      minor="${minor%%.*}"
+      CHANNEL="pipelines-${major}.${minor}"
+    else
+      CHANNEL="pipelines-${ver}"
+    fi
     export CHANNEL
     echo "CHANNEL=${CHANNEL} (from version=${ver})"
   fi
@@ -75,6 +125,11 @@ apply_custom_catalog() {
   local src="${CATALOG_SOURCE:-${UPGRADE_CATALOG_SOURCE:-redhat-operators}}" pod yaml
   [[ "$env" == prod || "$src" == redhat-operators ]] && return 0
   [[ -n "${KONFLUX_INDEX_IMAGE:-}" ]] || die "KONFLUX_INDEX_IMAGE required when OPERATOR_ENVIRONMENT != prod"
+
+  resolve_nightly
+  if [[ "$NIGHTLY" == true ]]; then
+    apply_pipelines_idms
+  fi
 
   yaml=$(mktemp "${TMPDIR:-/tmp}/catalog.XXXXXX")
   cat >"$yaml" <<EOF
@@ -144,9 +199,11 @@ install_pipelines_operator() {
   local cat_src="${CATALOG_SOURCE:-${UPGRADE_CATALOG_SOURCE:-redhat-operators}}"
   local env="${OPERATOR_ENVIRONMENT:-${UPGRADE_OPERATOR_ENVIRONMENT:-pre-stage}}"
   local idx="${KONFLUX_INDEX_IMAGE:-${UPGRADE_KONFLUX_INDEX_IMAGE:-}}"
-  echo "=== Installing OpenShift Pipelines operator (${ver}, ${cat_src}/${CHANNEL}${ver:+, csv=openshift-pipelines-operator-rh.v${ver}}) ==="
+  resolve_nightly
+  echo "=== Installing OpenShift Pipelines operator (${ver}, ${cat_src}/${CHANNEL}${ver:+, csv=openshift-pipelines-operator-rh.v${ver}}, nightly=${NIGHTLY}) ==="
   CATALOG_SOURCE="$cat_src" OPERATOR_ENVIRONMENT="$env" KONFLUX_INDEX_IMAGE="$idx" apply_custom_catalog
   CHANNEL="${CHANNEL}" CATALOG_SOURCE="$cat_src" OPERATOR_VERSION="${ver}" \
+    NIGHTLY="${NIGHTLY}" KONFLUX_INDEX_IMAGE="$idx" \
     bash "$REPO_ROOT/config/operators/install-pipelines.sh"
 }
 

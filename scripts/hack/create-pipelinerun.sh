@@ -196,6 +196,21 @@ resolve_from_ci_config() {
   return 0
 }
 
+is_nightly_index() {
+  [[ "${KONFLUX_INDEX_IMAGE:-}" == *:nightly ]]
+}
+
+resolve_nightly() {
+  if is_nightly_index; then
+    NIGHTLY=true
+  else
+    NIGHTLY=false
+  fi
+  export NIGHTLY
+  [[ "$NIGHTLY" == true ]] && echo "NIGHTLY=true (detected from KONFLUX_INDEX_IMAGE=* :nightly)"
+  return 0
+}
+
 write_workspace_spec() {
   local size="${PIPELINE_WORKSPACE_SIZE:-5Gi}"
   local mode="${PIPELINE_WORKSPACE_ACCESS_MODE:-ReadWriteOnce}"
@@ -290,6 +305,8 @@ spec:
       value: "${OPERATOR_ENVIRONMENT:-pre-stage}"
     - name: OPERATOR_VERSION
       value: "${OPERATOR_VERSION}"
+    - name: NIGHTLY
+      value: "${NIGHTLY:-false}"
     - name: GIT_INFRA_BRANCH
       value: "${GIT_INFRA_BRANCH:-main}"
     - name: TAGS
@@ -360,6 +377,7 @@ preflight
 
 parse_test_suites
 resolve_from_ci_config
+resolve_nightly
 
 [[ "$FW" != ginkgo || -n "${GIT_RELEASE_TESTS_GINKGO_BRANCH:-}" ]] \
   || die "GIT_RELEASE_TESTS_GINKGO_BRANCH required for ginkgo (set in env/.env or add to ci-config.yaml)"
@@ -376,6 +394,7 @@ case "${INSTALLER,,}" in
 esac
 _osp_short=$(echo "${OPERATOR_VERSION}" | sed 's/\.//g')
 _env_short="${OPERATOR_ENVIRONMENT:-prod}"
+[[ "${NIGHTLY}" == true ]] && _env_short="${_env_short}-nightly"
 _ocp_short=""
 if command -v oc &>/dev/null; then
   _ocp_short=$(oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null \
@@ -385,7 +404,7 @@ fi
 _fw_tag="$([ "$FW" = ginkgo ] && echo ginkgo- || echo "")"
 PREFIX="acceptance-tests-${_installer_tag}${_fw_tag}${_osp_short}-${_env_short}-on-${_ocp_short}-"
 
-echo "=== PipelineRun → ${NS}  framework=${FW}  cluster=${CLUSTER_NAME}  operator=${OPERATOR_VERSION}  channel=${CHANNEL} ==="
+echo "=== PipelineRun → ${NS}  framework=${FW}  cluster=${CLUSTER_NAME}  operator=${OPERATOR_VERSION}  channel=${CHANNEL}  nightly=${NIGHTLY} ==="
 echo "    install via pipeline: ${INSTALL_PIPELINES_OPERATOR:-true}"
 echo "    slack notification: ${SEND_SLACK_NOTIFICATION}"
 echo "    suites: ${TEST_SUITE_ITEMS[*]}"
