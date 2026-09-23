@@ -29,6 +29,9 @@ spec:
     default: "false"
   - name: JIB_MAVEN_REPOSITORY
     default: "quay.io/openshift-pipeline/jib-maven"
+  - name: NIGHTLY
+    description: "true when KONFLUX_INDEX_IMAGE ends with :nightly — channel-head install, no startingCSV pin"
+    default: "false"
   - name: OPERATOR_ENVIRONMENT
     description: "Operator environment (pre-stage, stage, prod) — controls which catalog is used for OLM skipRange validation"
     default: ""
@@ -51,6 +54,9 @@ spec:
   - name: GIT_RELEASE_TESTS_GINKGO_BRANCH
     description: Ginkgo repo branch (cache key when TEST_FRAMEWORK=ginkgo)
     default: ""
+  results:
+    - name: installed-osp-version
+      description: Actual installed operator version from CSV (e.g. 5.0.5-12345), or requested OSP_VERSION
   steps:
     - name: run
       image: $(params.IMAGE)
@@ -843,6 +849,9 @@ spec:
         save_results() {
           echo "Result: ${taskRunName}=${status}"
           echo "${taskRunName}: ${status}" > "$(workspaces.results.path)/${taskRunName}.result"
+          # Always emit installed-osp-version so pipeline tasks can consume it
+          # (install reconciles nightly CSV; other suites echo the OSP_VERSION they ran with).
+          printf '%s' "${OSP_VERSION:-${OSP_VER:-}}" > "$(results.installed-osp-version.path)"
           case "$FRAMEWORK" in
             gauge)
               [[ -f "${report_path}/xml-report/result.xml" ]] && \
@@ -901,10 +910,13 @@ spec:
 
         OSP_VER="$(params.OSP_VERSION)"
         [[ -n "$OSP_VER" ]] || { echo "ERROR: OSP_VERSION required"; exit 1; }
-        # OSP_VERSION=latest (pre-upgrade) → install the head of CHANNEL (latest
-        # z-stream, no startingCSV pin) instead of pinning an exact version.
+        # OSP_VERSION=latest (pre-upgrade) or NIGHTLY=true → install the head of
+        # CHANNEL (no startingCSV pin). Nightly CSVs are 5.0.5-<random>.
         INSTALL_LATEST=false
         [[ "${OSP_VER,,}" == latest ]] && INSTALL_LATEST=true
+        case "$(printf '%s' "$(params.NIGHTLY)" | tr '[:upper:]' '[:lower:]')" in
+          true|yes|1|on) INSTALL_LATEST=true; echo "NIGHTLY=true — channel-head install" ;;
+        esac
 
         # Resolve the OLM channel once for both the subscription (ensure_operator_csv)
         # and the gauge/ginkgo install specs. If CHANNEL is empty, derive
@@ -915,8 +927,8 @@ spec:
         if [[ -z "$CHANNEL" ]]; then
           chver="$(params.CHANNEL_VERSION)"
           [[ -z "$chver" ]] && chver="$OSP_VER"
-          if [[ "$chver" =~ ^[0-9]+\.[0-9]+ ]]; then
-            CHANNEL="pipelines-${chver%.*}"
+          if [[ "$chver" =~ ^([0-9]+)\.([0-9]+) ]]; then
+            CHANNEL="pipelines-${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
             echo "Derived OLM channel ${CHANNEL} from version ${chver}"
           else
             echo "WARN: CHANNEL empty and no concrete version to derive it from (CHANNEL_VERSION='$(params.CHANNEL_VERSION)', OSP_VERSION='${OSP_VER}')"
