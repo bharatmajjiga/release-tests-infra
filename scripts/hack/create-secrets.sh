@@ -106,7 +106,7 @@ case "$CRED_SOURCE" in local|vault) ;; *) die "CRED_SOURCE must be local or vaul
 
 if [[ "$CRED_SOURCE" == vault ]]; then
   eval "$(vault_sync)" || die "failed to load secrets from Vault"
-  # vault_sync runs in a subshell; keep Vault settings in this shell for follow-up reads (e.g. GCS-TOKEN).
+  # vault_sync runs in a subshell; keep Vault settings in this shell for follow-up reads (e.g. GCS_TOKEN).
   export VAULT_ADDR="${VAULT_ADDR:-https://vault.ci.openshift.org}"
   export VAULT_KV_MOUNT="${VAULT_KV_MOUNT:-kv}"
   export VAULT_KV_PATH="${VAULT_KV_PATH:-selfservice/openshift-pipelines/osp-ci-secrets}"
@@ -184,13 +184,13 @@ need UPLOADER_USERNAME UPLOADER_PASSWORD UPLOADER_HOST && apply_secret sed \
   -e "s|\$UPLOADER_USERNAME|${UPLOADER_USERNAME}|" -e "s|\$UPLOADER_PASSWORD|${UPLOADER_PASSWORD}|" \
   -e "s|\$UPLOADER_HOST|${UPLOADER_HOST}|" "$SECRETS_DIR/uploader.yaml"
 
-# GCS artifact storage — pulls SA key from env/.env (GCS_SA_KEY_JSON) or Vault (GCS-TOKEN)
+# GCS artifact storage — pulls SA key from env/.env (GCS_SA_KEY_JSON) or Vault (GCS_TOKEN)
 _gcs_json=""
 if [[ -n "${GCS_SA_KEY_JSON:-}" ]]; then
   _gcs_json="$GCS_SA_KEY_JSON"
 elif command -v vault &>/dev/null && [[ -n "${VAULT_TOKEN:-}" ]]; then
   _gcs_json=$(vault kv get -format=json "${VAULT_KV_MOUNT:-kv}/${VAULT_KV_PATH:-selfservice/openshift-pipelines/osp-ci-secrets}" \
-    2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data'].get('GCS-TOKEN',''))" 2>/dev/null) || true
+    2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['data'].get('GCS_TOKEN',''))" 2>/dev/null) || true
 fi
 
 if [[ -n "$_gcs_json" ]]; then
@@ -208,8 +208,8 @@ else
   if oc get secret gcs-artifacts -n "$NAMESPACE" &>/dev/null; then
     echo "  gcs-artifacts secret already exists"
   else
-    echo "  WARNING: GCS-TOKEN not found in Vault and GCS_SA_KEY_JSON not set"
-    echo "  Add the GCS SA key JSON as GCS-TOKEN in Vault: ${VAULT_KV_MOUNT:-kv}/${VAULT_KV_PATH:-selfservice/openshift-pipelines/osp-ci-secrets}"
+    echo "  WARNING: GCS_TOKEN not found in Vault and GCS_SA_KEY_JSON not set"
+    echo "  Add the GCS SA key JSON as GCS_TOKEN in Vault: ${VAULT_KV_MOUNT:-kv}/${VAULT_KV_PATH:-selfservice/openshift-pipelines/osp-ci-secrets}"
   fi
 fi
 
