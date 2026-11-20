@@ -65,3 +65,6 @@
 '4.22':
   release-ui-tests:
     revision: release-v4.22
+'5.0':
+  release-ui-tests:
+    revision: release-v5.0
